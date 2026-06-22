@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本公司商品搜尋 — Hybrid Search</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e6e8ec; --muted:#8b93a1;
+          --accent:#4f8cff; --good:#36c98a; --warn:#ffb454; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  .wrap { max-width:860px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .bar { display:flex; gap:10px; align-items:center; }
+  #q { flex:1; padding:12px 14px; font-size:16px; background:var(--card); color:var(--fg);
+       border:1px solid var(--line); border-radius:10px; }
+  #q:focus { outline:none; border-color:var(--accent); }
+  button { padding:12px 20px; font-size:15px; font-weight:600; background:var(--accent);
+           color:#fff; border:0; border-radius:10px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  .examples { margin:14px 0 4px; display:flex; flex-wrap:wrap; gap:8px; }
+  .chip { font-size:12px; color:var(--muted); background:var(--card); border:1px solid var(--line);
+          padding:5px 10px; border-radius:999px; cursor:pointer; }
+  .chip:hover { color:var(--fg); border-color:var(--accent); }
+  #status { margin:18px 0 10px; color:var(--muted); font-size:13px; min-height:18px; }
+  #status.err { color:var(--warn); }
+  ol.results { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
+  li.item { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .row1 { display:flex; align-items:baseline; gap:10px; }
+  .rank { color:var(--muted); font-variant-numeric:tabular-nums; font-size:13px; min-width:22px; }
+  .name { font-weight:600; font-size:15px; }
+  .meta { margin-top:7px; display:flex; flex-wrap:wrap; gap:6px; }
+  .tag { font-size:12px; color:var(--muted); background:#22262f; border:1px solid var(--line);
+         padding:3px 9px; border-radius:6px; }
+  .tag b { color:var(--fg); font-weight:600; }
+  .scorewrap { margin-top:9px; display:flex; align-items:center; gap:8px; }
+  .scorebar { flex:1; height:6px; background:#22262f; border-radius:4px; overflow:hidden; }
+  .scorefill { height:100%; background:linear-gradient(90deg,var(--accent),var(--good)); }
+  .scoreval { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; min-width:46px; text-align:right; }
+  .foot { margin-top:26px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px; }
+  .foot code { background:var(--card); padding:1px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>本公司商品搜尋 <span style="color:var(--muted);font-weight:400">Hybrid Search</span></h1>
+  <div class="sub">k-NN（語意）+ BM25（詞面）min-max 融合 · 全量 26,014 筆 · 後端 <code>localhost:8000/search</code></div>
+
+  <div class="bar">
+    <input id="q" placeholder="輸入關鍵字或情境，例：冬天手腳冰冷" autofocus>
+    <button id="go">搜尋</button>
+  </div>
+
+  <div class="examples" id="examples"></div>
+
+  <div id="status"></div>
+  <ol class="results" id="results"></ol>
+
+  <div class="foot">
+    回應欄位：<code>mart_id</code> · <code>mart_name</code> · <code>score</code>(融合分) ·
+    <code>brand</code> · <code>price</code> · <code>category</code>。
+    分數為 min-max 融合分（非單路 _score），僅供同次查詢內排序比較。
+  </div>
+</div>
+
+<script>
+const BACKEND = "http://localhost:8000/search";
+// 前端相關度門檻：融合分數低於此值的結果不顯示（純 UX 修剪弱尾巴，可調）。
+// 注意：融合分是 per-query 相對分（min-max 會把每條 query 的最佳結果拉到 ~0.8），
+// 故此門檻能修一般 query 的弱尾，但擋不掉「目錄沒有的爛 query 仍回最佳爛結果」。
+const MIN_SCORE = 0.26;
+// 固定抓取筆數：不讓使用者指定，由 MIN_SCORE 門檻決定最終顯示幾筆。
+// 抓 50 給門檻足夠候選過濾（相關結果通常遠少於此）。
+const SIZE = 50;
+const EXAMPLES = ["氣炸鍋", "ThinkPad 筆電", "冬天手腳冰冷", "睡不著覺", "送長輩的養生禮盒", "久坐肩頸痠痛"];
+const $ = (id) => document.getElementById(id);
+const elQ = $("q"), elGo = $("go"), elStatus = $("status"), elResults = $("results");
+
+// 範例 chips
+EXAMPLES.forEach((t) => {
+  const c = document.createElement("span");
+  c.className = "chip";
+  c.textContent = t;
+  c.onclick = () => { elQ.value = t; search(); };
+  $("examples").appendChild(c);
+});
+
+function fmtPrice(p) { return (p === null || p === undefined) ? null : "NT$" + Number(p).toLocaleString(); }
+
+// 以安全的 DOM 方法建一個 tag（textContent，不用 innerHTML）
+function makeTag(label, value) {
+  const span = document.createElement("span");
+  span.className = "tag";
+  span.append(label + " ");
+  const b = document.createElement("b");
+  b.textContent = value;       // 使用者/商品資料一律走 textContent，無 XSS 風險
+  span.append(b);
+  return span;
+}
+
+function renderItem(it, i, maxScore) {
+  const li = document.createElement("li");
+  li.className = "item";
+
+  const row1 = document.createElement("div");
+  row1.className = "row1";
+  const rank = document.createElement("span");
+  rank.className = "rank";
+  rank.textContent = (i + 1) + ".";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = it.mart_name ?? "(無品名)";
+  row1.append(rank, name);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  if (it.brand) meta.append(makeTag("品牌", it.brand));
+  const price = fmtPrice(it.price);
+  if (price) meta.append(makeTag("價格", price));
+  if (it.category) meta.append(makeTag("分類", it.category));
+  meta.append(makeTag("ID", it.mart_id));
+
+  const scoreWrap = document.createElement("div");
+  scoreWrap.className = "scorewrap";
+  const barOuter = document.createElement("div");
+  barOuter.className = "scorebar";
+  const barFill = document.createElement("div");
+  barFill.className = "scorefill";
+  barFill.style.width = Math.round(((it.score || 0) / maxScore) * 100) + "%";
+  barOuter.append(barFill);
+  const scoreVal = document.createElement("span");
+  scoreVal.className = "scoreval";
+  scoreVal.textContent = (it.score ?? 0).toFixed(4);
+  scoreWrap.append(barOuter, scoreVal);
+
+  li.append(row1, meta, scoreWrap);
+  return li;
+}
+
+async function search() {
+  const q = elQ.value.trim();
+  if (!q) { elStatus.textContent = "請先輸入關鍵字"; elStatus.className = "err"; return; }
+
+  elGo.disabled = true; elStatus.className = ""; elStatus.textContent = "搜尋中…"; elResults.replaceChildren();
+  const t0 = performance.now();
+  try {
+    const res = await fetch(`${BACKEND}?q=${encodeURIComponent(q)}&size=${SIZE}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+
+    const items = data.results || [];
+    const ms = Math.round(performance.now() - t0);
+    if (!items.length) { elStatus.textContent = `「${q}」查無結果（${ms}ms）`; return; }
+
+    // 前端相關度門檻：只顯示融合分 ≥ MIN_SCORE 的結果，其餘隱藏。
+    const shown = items.filter((it) => (it.score || 0) >= MIN_SCORE);
+    if (!shown.length) { elStatus.textContent = `「${q}」無相關度 ≥${MIN_SCORE} 的結果（${ms}ms）`; return; }
+
+    let routeInfo = "";
+    if (data.route_label) {
+      const map = { manual: "✋ 手動" };  // auto_route 已移除，route_label 僅 manual / None
+      routeInfo = `　·　判型 ${map[data.route_label] || data.route_label}（bm25權重 ${data.applied_bm25_weight}）`;
+    }
+    elStatus.textContent = `「${data.query}」找到 ${shown.length} 筆相關結果（${ms}ms）${routeInfo}`;
+
+    const maxScore = Math.max(...shown.map((i) => i.score || 0), 0.0001);
+    const frag = document.createDocumentFragment();
+    shown.forEach((it, i) => frag.append(renderItem(it, i, maxScore)));
+    elResults.append(frag);
+  } catch (e) {
+    elStatus.className = "err";
+    elStatus.textContent = "錯誤：" + e.message + "（確認後端在 localhost:8000 跑、lab 憑證未過期）";
+  } finally {
+    elGo.disabled = false;
+  }
+}
+
+elGo.onclick = search;
+elQ.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+</script>
+</body>
+</html>

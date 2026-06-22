@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (本機開發用)
+.docker/
+postgres_data/
+redis_data/
+localstack_data/
+
+# Local S3 data (LocalStack 同步來源)
+aws-s3/
+
+# 本公司商品資料 (公司機密，一律不對外)：忽略整個目錄，含 OpenSearch seed 快照。
+# 註：原本保留 seed 供同事一鍵跑 make search-setup，現依機密政策改為不入庫，
+# 需自行放置來源檔 (見 scripts/etl/load_products_os.py 的 SOURCE_FILE)。
+products/
+
+# ETL 輸出 (含經銷商業績敏感資料)
+out/
+
+# 經銷商統編對照 (PII)：忽略整個 data/，但保留 *.example.json 結構範例
+data/*
+!data/*.example.json
+
+# 含真實經銷商名稱/客代/業績的內部分析文件 (機密，不對外)
+docs/plans/promo-forecast-moea-business-scope.md
+docs/plans/promo-forecast-data-fitness.md
+
+# 商品評測 golden set (含真實本公司商品名/ID，機密，不對外)
+scripts/etl/golden_set_product_search.yaml
+
+# Build artifacts
+dist/
+build/
+*.egg-info/

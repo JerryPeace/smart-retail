@@ -1,0 +1,5 @@
+{
+  "_comment": "客代(dealer_id) → 統編(tax_id) 對照表範例。真實檔為 data/zhuanhu_tax_ids.json (已 gitignore，含 PII)。production 應改接 HubSpotService 動態查詢。下方為假資料，僅示意結構。",
+  "000001": "12345678",
+  "000002": "87654321"
+}

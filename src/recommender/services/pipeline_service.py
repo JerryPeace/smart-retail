@@ -1,0 +1,126 @@
+"""Pipeline — 編排 dataset → agent → save 全流程"""
+import logging
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from recommender.config import settings
+from recommender.db import SessionLocal
+from recommender.errors import NotFoundError
+from recommender.models.job import JobStatus, PipelineJob
+from recommender.repositories.job_repo import JobRepository
+from recommender.repositories.recommendation_repo import RecommendationRepository
+from recommender.schemas.pipeline import JobResponse
+from recommender.services.agent_service import AgentService
+from recommender.services.dataset_service import DatasetService
+
+logger = logging.getLogger(__name__)
+
+
+class PipelineService:
+    def __init__(
+        self,
+        dataset: DatasetService,
+        agent: AgentService,
+        job_repo: JobRepository,
+        rec_repo: RecommendationRepository,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = SessionLocal,
+    ) -> None:
+        self.dataset = dataset
+        self.agent = agent
+        # job_repo / rec_repo 綁 request-scoped session,只給 create_job / get_job
+        # (在 request 生命週期內呼叫) 用。run() 在 BackgroundTask 跑,不能用它們。
+        self.job_repo = job_repo
+        self.rec_repo = rec_repo
+        # run() 自己開新 session 用的 factory (review #2)
+        self._session_factory = session_factory
+
+    async def create_job(
+        self, customer_id: str, brand: str, month: str
+    ) -> JobResponse:
+        job = await self.job_repo.create(
+            customer_id=customer_id, brand=brand, month=month
+        )
+        return self._to_response(job)
+
+    async def get_job(self, job_id: int) -> JobResponse:
+        """查無 → raise NotFoundError"""
+        job = await self.job_repo.get(job_id)
+        if job is None:
+            raise NotFoundError(f"Job {job_id} not found")
+        return self._to_response(job)
+
+    def _to_response(self, job: PipelineJob) -> JobResponse:
+        return JobResponse(
+            job_id=job.id,
+            status=job.status,
+            customer_id=job.customer_id,
+            brand=job.brand,
+            month=job.month,
+            error=job.error,
+            recommendation_id=job.recommendation_id,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+        )
+
+    async def run(self, job_id: int) -> None:
+        """完整 pipeline,在 BackgroundTask 跑.
+
+        review #2:BackgroundTask 在 response 送出後才執行,此時 request-scoped
+        session 早已被 async with 關閉。若沿用 self.job_repo (綁舊 session) 會在
+        第一次 await 就 InvalidRequestError。故這裡自己開一個獨立 session,並用它
+        重建 repo,生命週期跟著背景任務走。
+
+        失敗時記錄錯誤狀態並 re-raise,讓 BackgroundTask 把例外吞掉前留下 trace。
+        """
+        async with self._session_factory() as session:
+            job_repo = JobRepository(session)
+            rec_repo = RecommendationRepository(session)
+
+            job = await job_repo.get(job_id)
+            if job is None:
+                raise NotFoundError(f"Job {job_id} not found")
+
+            try:
+                # === Step 1: Dataset preparation (S3 raw → cleaned dataset) ===
+                await job_repo.update_status(job_id, JobStatus.cleaning)
+                cleaned_key, _report = await self.dataset.prepare(
+                    customer_id=job.customer_id,
+                    brand=job.brand,
+                    month=job.month,
+                )
+                # TODO: 把 _report (rows_in/out 等) 寫進 PipelineJob
+
+                # === Step 2: Agent analyze ===
+                await job_repo.update_status(job_id, JobStatus.analyzing)
+                agent_output = await self.agent.analyze(
+                    customer_id=job.customer_id,
+                    dataset_s3_key=cleaned_key,
+                )
+
+                # === Step 3: Save recommendation ===
+                await job_repo.update_status(job_id, JobStatus.saving)
+                rec = await rec_repo.create_from_agent_output(
+                    customer_id=job.customer_id,
+                    output=agent_output,
+                    model_id=settings.bedrock_model_id,
+                    pipeline_job_id=job_id,
+                )
+
+                # === Step 4: Trigger evaluation (異步,不阻塞 pipeline 完成) ===
+                # await self.agent.trigger_evaluation(rec.id)
+
+                await job_repo.update_status(
+                    job_id, JobStatus.done, recommendation_id=rec.id
+                )
+
+            except Exception:
+                # review #6:完整 traceback 只進 log,DB / client 只存通用訊息,不洩內部細節
+                logger.exception("Pipeline job %s failed", job_id)
+                await job_repo.update_status(
+                    job_id,
+                    JobStatus.failed,
+                    error=f"Pipeline failed during processing (job {job_id})",
+                )
+                raise

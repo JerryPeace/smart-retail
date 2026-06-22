@@ -1,0 +1,187 @@
+# ===================================================================
+# Marketing Cleaner POC - Development docker-compose
+# 對齊 intellio.ai conventions:
+# - postgres 17 / redis 7 / localstack 3.8
+# - app-network bridge
+# - .env.local
+# - profiles for optional services
+# Port 全部錯開 intellio.ai,可同時跑兩個專案
+# ===================================================================
+services:
+  postgres:
+    image: postgres:17
+    container_name: marketing-poc-postgres
+    ports:
+      - "5434:5432"
+    environment:
+      - POSTGRES_USER=${DATABASE_USERNAME}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+      - POSTGRES_DB=${DATABASE_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      app-network:
+        aliases:
+          - postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USERNAME} -d ${DATABASE_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: marketing-poc-redis
+    ports:
+      - "6380:6379"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: redis-server --requirepass "$REDIS_PASSWORD"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: marketing-poc-localstack
+    ports:
+      - "4567:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      - AWS_DEFAULT_REGION=${AWS_REGION}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - GATEWAY_LISTEN=0.0.0.0:4566
+      - EDGE_PORT=4566
+      - PERSISTENCE=1
+      - SKIP_SSL_CERT_DOWNLOAD=1
+      - ENFORCE_IAM=0
+      - S3_SKIP_SIGNATURE_VALIDATION=0
+      - S3_SKIP_KMS_KEY_VALIDATION=1
+      - PROVIDER_OVERRIDE_S3=asf
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ready.d 機制: LocalStack 啟動完成後自動執行 init script
+      - ./scripts/localstack/init-buckets.sh:/etc/localstack/init/ready.d/init-buckets.sh
+      # 把 fixture 資料夾掛進來,init script 可以直接 sync 上 S3
+      - ./products:/fixtures/products:ro
+      - ./customers:/fixtures/customers:ro
+    networks:
+      - app-network
+
+  adminer:
+    image: adminer:latest
+    container_name: marketing-poc-adminer
+    ports:
+      - "8081:8080"
+    networks:
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  opensearch:
+    build:
+      # inline Dockerfile：只裝 smartcn plugin（無 COPY，故 BuildKit 不傳 context）。
+      # 取代原 docker/opensearch/Dockerfile，少維護一個檔。
+      context: .
+      dockerfile_inline: |
+        FROM opensearchproject/opensearch:2.19.5
+        # 安裝 smartcn 中文分詞 plugin（版本必須與 OpenSearch 完全一致）
+        # analysis-kuromoji 是日文，不裝
+        RUN /usr/share/opensearch/bin/opensearch-plugin install --batch analysis-smartcn
+    image: marketing-poc-opensearch:local
+    container_name: marketing-poc-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true        # 僅限本地 POC
+      - DISABLE_INSTALL_DEMO_CONFIG=true    # 僅限本地 POC
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  opensearch-dashboards:
+    profiles:
+      - dashboards
+    image: opensearchproject/opensearch-dashboards:2.19.5
+    container_name: marketing-poc-opensearch-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true  # 僅限本地 POC
+    networks:
+      - app-network
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  api:
+    profiles:
+      - api
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    container_name: marketing-poc-api
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_started
+    working_dir: /app
+    env_file:
+      - .env.local
+    environment:
+      # Container 內部 hostname 覆蓋 .env.local 的 localhost
+      - DATABASE_URL=postgresql+asyncpg://${DATABASE_USERNAME}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - AWS_ENDPOINT_URL_S3=http://localstack:4566
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - .:/app:cached
+      - uv_cache:/root/.cache/uv
+    networks:
+      - app-network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        uv sync &&
+        uv run alembic upgrade head &&
+        uv run uvicorn cleaner.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+volumes:
+  postgres_data:
+  redis_data:
+  localstack_data:
+  uv_cache:
+  opensearch_data:
+
+networks:
+  app-network:
+    driver: bridge
