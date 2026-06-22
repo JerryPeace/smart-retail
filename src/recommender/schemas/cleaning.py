@@ -1,9 +1,9 @@
-"""Cleaning report schemas — Cleaner 跑完一次的成果報告"""
+"""Cleaning report schemas — the result report for one Cleaner run."""
 from pydantic import BaseModel, Field
 
 
 class RowError(BaseModel):
-    """單筆驗證失敗的 row 紀錄"""
+    """Record for a single row that failed validation."""
 
     row_index: int
     raw_data: dict
@@ -11,12 +11,12 @@ class RowError(BaseModel):
 
 
 class CleaningReport(BaseModel):
-    """一次 cleaning 任務的成果"""
+    """The result of one cleaning task."""
 
     raw_key: str
     cleaned_key: str | None = None
     brand: str
-    mapping_used: str  # 用了哪個 mapper(brand_name 或 default)
+    mapping_used: str  # which mapper was used (brand_name or default)
 
     rows_input: int = 0
     rows_output: int = 0

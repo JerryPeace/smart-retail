@@ -1,25 +1,25 @@
-"""Phase 2c-1 Step 4b：在 50 條 golden set 上掃 w_bm25，確認 w=0.7 是否站得住（非孤峰）.
+"""Phase 2c-1 Step 4b: sweep w_bm25 over the 50-query golden set to confirm whether w=0.7 holds up (and isn't an isolated spike).
 
-目的（plan Phase 2c-1 地基）：
-  bootstrap 已證明 hybrid−bm25 margin 在 50 條上不顯著（CI 跨 0）。本腳本回答第二個問題：
-  prod 的 w_bm25=0.7 是不是在 50 條上「掃出來的孤峰」（=過擬合），還是在一段平坦區間裡？
-  做法：用 prod 的 min_max_score_fusion 在 candidate_k=20 上離線重融合，掃 w_bm25∈{0.5..0.9}，
-  比各自全局 rel@10。平坦 → 0.7 不特殊、調 w 無意義（佐證 bootstrap）；尖峰 → 確有過擬合。
+Purpose (plan Phase 2c-1 foundation):
+  Bootstrap already showed the hybrid−bm25 margin is not significant over the 50 queries (CI crosses 0). This script answers the second question:
+  is prod's w_bm25=0.7 an "isolated spike swept out" of the 50 queries (= overfitting), or does it sit within a flat plateau?
+  Approach: use prod's min_max_score_fusion to re-fuse offline at candidate_k=20, sweep w_bm25∈{0.5..0.9},
+  and compare each one's global rel@10. Flat → 0.7 isn't special, tuning w is pointless (corroborates bootstrap); sharp peak → overfitting does exist.
 
-成本控制（safety.md §1）：
-  最大化複用——seed label 取自 Step 3 報告（out/search_eval_hybrid_50q_*.md）的 ✓/✗，
-  只對 w-sweep 新進 top-10 但未判過的 gap pair 打 Opus judge。judge 模型對齊 Step 3（opus-4-8）。
+Cost control (safety.md §1):
+  Maximize reuse — seed labels come from the ✓/✗ in the Step 3 report (out/search_eval_hybrid_50q_*.md),
+  and the Opus judge is only invoked for gap pairs newly entering the top-10 in the w-sweep that haven't been judged yet. The judge model matches Step 3 (opus-4-8).
 
-用法：
+Usage:
   JUDGE_MODEL_ID=jp.anthropic.claude-opus-4-8 uv run python scripts/etl/wsweep_50q.py
-  （app 不需啟動；直打 OpenSearch + 直呼 Bedrock judge）
+  (the app doesn't need to be running; this hits OpenSearch directly + calls the Bedrock judge directly)
 """
 from __future__ import annotations
 
 import importlib.util
 import os
 
-# 對齊 Step 3 judge 模型（須在載入 judge 模組前設定，模組於 import 時讀 env）
+# match the Step 3 judge model (must be set before loading the judge module, which reads env at import time)
 os.environ.setdefault("JUDGE_MODEL_ID", "jp.anthropic.claude-opus-4-8")
 
 import re
@@ -32,15 +32,15 @@ SCRIPT_DIR = Path(__file__).parent
 REPORT = Path("out/search_eval_hybrid_50q_20260613.md")
 RUNS_CACHE = Path("out/wsweep_runs_50q.json")
 OUT_MD = Path("out/phase2c1_wsweep_50q_20260613.md")
-CANDIDATE_K = 20  # prod candidate_multiplier(2) × size(10)，對齊 prod 融合候選窗
+CANDIDATE_K = 20  # prod candidate_multiplier(2) x size(10), matching prod's fusion candidate window
 W_GRID = [0.5, 0.6, 0.7, 0.8, 0.9]
 TOP_K = 10
 
-# prod 融合函式（零分歧）
+# prod fusion function (no divergence)
 sys.path.insert(0, str(SCRIPT_DIR.parent.parent / "src"))
 from search_engine.fusion import min_max_score_fusion  # noqa: E402
 
-# 報告表格 regex（複製自 investigate_hybrid_fusion.py，proven）
+# report-table regex (copied from investigate_hybrid_fusion.py, proven)
 QID_RE = re.compile(r"^## (q\d+)「(.+)」 \((\w+)\)")
 ROW5_RE = re.compile(r"^\|\s*(\d+) \| (\d+) \| (.*) \| ([\d.]+) \| ([✓✗]) ?(.*?) \|$")
 ROW4_RE = re.compile(r"^\|\s*(\d+) \| (\d+) \| (.*) \| ([✓✗]) ?(.*?) \|$")
@@ -56,7 +56,7 @@ def _load(name: str):
 
 
 def parse_report(path: Path) -> dict:
-    """從 Step 3 三欄報告解析 (qid, mid) → {relevant, reason}（seed label）。"""
+    """Parse the Step 3 three-column report into (qid, mid) → {relevant, reason} (seed labels)."""
     labels: dict = {}
     qid = mode = None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -84,7 +84,7 @@ def parse_report(path: Path) -> dict:
 
 
 def fetch_runs(queries: list[dict], verify_mod) -> dict:
-    """{qid: {category, knn:[{mid,score,martName,feature}], bm25:[...]}}，落地快取。"""
+    """{qid: {category, knn:[{mid,score,martName,feature}], bm25:[...]}}, persisted to a cache."""
     if RUNS_CACHE.exists():
         print(f"[runs] 重用快取 {RUNS_CACHE}")
         return json.loads(RUNS_CACHE.read_text(encoding="utf-8"))
@@ -125,7 +125,7 @@ def main() -> None:
 
     runs = fetch_runs(queries, verify_mod)
 
-    # 各條件的 per-query top-10（id 清單）
+    # per-query top-10 (list of ids) for each condition
     conditions: dict[str, dict[str, list[str]]] = {}
     for w in W_GRID:
         conditions[f"minmax_w{int(w*100)}"] = {}
@@ -144,7 +144,7 @@ def main() -> None:
         conditions["knn_only"][qid] = [h["mid"] for h in r["knn"][:TOP_K]]
         conditions["bm25_only"][qid] = [h["mid"] for h in r["bm25"][:TOP_K]]
 
-    # 收集需要 label 的 pair，扣掉 seed，judge gap
+    # collect the pairs needing labels, subtract the seed, judge the gap
     needed: set = set()
     for per_q in conditions.values():
         for qid, top10 in per_q.items():
@@ -161,7 +161,7 @@ def main() -> None:
     if items:
         judge_mod._judge_batch(items, cache)
 
-    # 計算各條件全局 + 分類別 rel@10
+    # compute global + per-category rel@10 for each condition
     cats = {q["id"]: q["category"] for q in queries}
 
     def rel_totals(per_q: dict[str, list[str]]) -> dict[str, int]:
@@ -174,7 +174,7 @@ def main() -> None:
 
     results = {name: rel_totals(pq) for name, pq in conditions.items()}
 
-    # 報告
+    # report
     lines = [
         "# Phase 2c-1 Step 4b — w_bm25 敏感度掃描（50 條）\n",
         f"> 來源 seed：`{REPORT}`（{len(seed)} 筆複用）　|　judge：`{judge_mod.JUDGE_MODEL_ID}`　"

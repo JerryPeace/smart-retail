@@ -1,4 +1,4 @@
-"""PipelineJob 的 DB access"""
+"""DB access for PipelineJob."""
 from recommender.timeutil import utcnow
 
 from sqlmodel import select

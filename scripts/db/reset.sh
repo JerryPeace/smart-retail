@@ -1,5 +1,5 @@
 #!/bin/bash
-# 完全重置 DB(刪 volume 重建)
+# Fully reset the DB (delete the volume and rebuild)
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

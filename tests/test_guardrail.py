@@ -1,9 +1,10 @@
-"""B2 guardrail 設定實效驗證（tasks.md 7.5）。
+"""B2 guardrail config effectiveness verification (tasks.md 7.5).
 
-確認 bedrock_guardrail_id / bedrock_guardrail_version 宣告進 Settings 後,
-`AgentService._guardrail_config()` 會真的讀到 —— 不再被 config.py 的
-`extra="ignore"` 靜默吞掉(舊 code 用 getattr 探一個未宣告欄位,永遠 None)。
-純讀 settings,不需 DB / 不打 Bedrock。
+Confirms that once bedrock_guardrail_id / bedrock_guardrail_version are declared
+in Settings, `AgentService._guardrail_config()` actually reads them — no longer
+silently swallowed by config.py's `extra="ignore"` (old code used getattr to
+probe an undeclared field, which was always None). Reads settings only; no DB,
+no Bedrock calls.
 """
 from recommender.config import settings
 from recommender.services.agent_service import AgentService
@@ -19,7 +20,7 @@ def test_guardrail_config_built_when_id_set(monkeypatch):
     monkeypatch.setattr(settings, "bedrock_guardrail_version", None)
     assert AgentService()._guardrail_config() == {
         "guardrailIdentifier": "gr-test",
-        "guardrailVersion": "DRAFT",  # version 未設 → fallback DRAFT
+        "guardrailVersion": "DRAFT",  # version unset → fallback to DRAFT
         "trace": "enabled",
     }
 

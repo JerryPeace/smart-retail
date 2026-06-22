@@ -1,9 +1,9 @@
-"""LLM 結構化輸出 schema — agent 產出的推薦報告契約
+"""LLM structured-output schema — the contract for the recommendation report the agent produces.
 
-這份 schema 同時:
-  1. 給 LangChain `with_structured_output()` 當 LLM 輸出契約
-  2. 給 DB Recommendation.payload 寫入時的型別保證
-  3. 給 HubSpotRenderer 讀取時的型別保證
+This schema simultaneously serves as:
+  1. The LLM output contract for LangChain `with_structured_output()`
+  2. The type guarantee when writing to DB Recommendation.payload
+  3. The type guarantee when HubSpotRenderer reads it
 """
 from datetime import datetime
 
@@ -27,7 +27,7 @@ class CustomerInsight(BaseModel):
 
 
 class RecommendationOutput(BaseModel):
-    """Agent 結構化輸出 v1.0"""
+    """Agent structured output v1.0."""
 
     schema_version: Literal["v1.0"] = "v1.0"
     customer_segment: Literal["high-value", "mid-tier", "new", "churning"]

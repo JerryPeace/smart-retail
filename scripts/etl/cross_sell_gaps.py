@@ -1,16 +1,16 @@
 """
-Tier 1 ETL: 從 本公司 績效追蹤 xlsx 偵測經銷商交叉銷售缺口.
+Tier 1 ETL: detect dealer cross-sell gaps from the company's performance-tracking xlsx.
 
-輸入  : aws-s3/績效追蹤{月}.xlsx
-輸出  : out/cross_sell_gaps_{YYYY-MM}.csv
+Input   : aws-s3/績效追蹤{月}.xlsx
+Output  : out/cross_sell_gaps_{YYYY-MM}.csv
 
-缺口定義 (用「當月 + 上月同期」作為近期購買 proxy):
-  Rule 1: 買通訊未買配件        (高毛利缺口)
-  Rule 2: 買家電未買保健        (高毛利缺口)
-  Rule 3: 只買單一品類           (任何品類)
-  Rule 4: 買通訊或資訊, 未買二手機
+Gap definitions (use "this month + same period last month" as a proxy for recent purchases):
+  Rule 1: bought telecom but not accessories   (high-margin gap)
+  Rule 2: bought home appliances but not health (high-margin gap)
+  Rule 3: bought only a single category         (any category)
+  Rule 4: bought telecom or IT, but not pre-owned phones
 
-每個 (經銷商 × 命中規則) 一行, 含業務直接可用的開場白模板.
+One row per (dealer x matched rule), including an opening-line template the sales team can use directly.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
-# 6 prompt 品類 -> 對應 xlsx col index 列表 (含當月 + 上月同期)
-# 通訊 = 行動電話 + 平板 (合併處理)
+# the 6 prompt categories -> list of corresponding xlsx col indexes (incl. this month + same period last month)
+# 通訊 = mobile phones + tablets (merged together)
 CATEGORY_COLS: dict[str, list[int]] = {
     "通訊": [6, 7, 34, 35],
     "資訊": [38, 39],
@@ -38,7 +38,7 @@ REGION_MAP: dict[str, str] = {
     "企業客戶業務處": "專戶",
 }
 
-# 開場白模板 (PO 可調整)
+# opening-line templates (PO can adjust)
 OPENING_LINES: dict[str, str] = {
     "rule1": "{name} 老闆, 您近期通訊產品有銷售但配件這塊還沒起來. 配件毛利比通訊高 3-4 倍, 幫您看看搭售方案?",
     "rule2": "{name} 老闆, 家電有量但保健尚未開發. 保健是高毛利主推品項, 安排 30 分鐘看樣?",

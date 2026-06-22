@@ -1,4 +1,4 @@
-"""Evaluation schemas — LLM-as-judge 對 recommendation 的評分"""
+"""Evaluation schemas — LLM-as-judge scoring of recommendations."""
 from datetime import datetime
 
 from recommender.timeutil import utcnow
@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class EvaluationOutput(BaseModel):
-    """Judge LLM 結構化輸出 (5 維,0-1 連續分數)"""
+    """Judge LLM structured output (5 dimensions, continuous 0-1 scores)."""
 
     relevance_score: float = Field(..., ge=0, le=1, description="推薦商品是否適合此經銷商")
     specificity_score: float = Field(..., ge=0, le=1, description="理由是否引用具體證據")

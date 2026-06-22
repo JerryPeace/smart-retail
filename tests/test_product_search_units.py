@@ -1,15 +1,16 @@
-"""商品語意搜尋 POC — 純函式單元測試.
+"""Product semantic search POC — pure-function unit tests.
 
-涵蓋範圍：
+Coverage:
   - load_products_os.py  : detect_format, extract_sources
-  - embed_products_os.py : build_embed_text (含 strip_html)
-  - verify_search_os.py  : load_golden_set（approved gate）
+  - embed_products_os.py : build_embed_text (incl. strip_html)
+  - verify_search_os.py  : load_golden_set (approved gate)
 
-設計原則（對齊 tests/test_etl_units.py 慣例）：
+Design principles (aligned with the tests/test_etl_units.py conventions):
   - no DB / no network / no Docker
-  - 三支腳本以 importlib.util.spec_from_file_location 載入
-    （腳本有 if __name__ == "__main__": guard，import 時零 IO）
-  - 不測 OpenSearch / Bedrock I/O（已拍板：I/O 驗證走 curl/_count 手動判準）
+  - the three scripts are loaded via importlib.util.spec_from_file_location
+    (the scripts have an if __name__ == "__main__": guard, so importing does zero IO)
+  - does not test OpenSearch / Bedrock I/O (decided: I/O verification goes through
+    manual curl/_count checks)
 """
 
 from __future__ import annotations
@@ -21,13 +22,13 @@ from textwrap import dedent
 
 import pytest
 
-# ---------- 腳本模組載入輔助 ----------
+# ---------- script module loading helpers ----------
 
 _SCRIPTS_DIR = Path(__file__).parent.parent / "scripts" / "etl"
 
 
 def _load_script(name: str):
-    """以 importlib 安全載入腳本模組（不觸發 __main__ guard）."""
+    """Safely load a script module via importlib (without triggering the __main__ guard)."""
     path = _SCRIPTS_DIR / name
     spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
     mod = importlib.util.module_from_spec(spec)
@@ -35,7 +36,7 @@ def _load_script(name: str):
     return mod
 
 
-# 模組層級只載入一次（避免每個 test 重複 IO）
+# Load once at module level (avoids repeating IO for each test)
 _load = _load_script
 _load_mod = {}
 
@@ -66,10 +67,10 @@ class TestDetectFormat:
 
     def test_non_list_raises(self):
         with pytest.raises(ValueError):
-            self._fn()({"martId": 1001})  # dict 不是 list
+            self._fn()({"martId": 1001})  # dict is not a list
 
     def test_unknown_keys_raises(self):
-        # 第一個元素是 dict 但無 martId 也無 _source
+        # first element is a dict but has neither martId nor _source
         with pytest.raises(ValueError):
             self._fn()([{"someRandomKey": "value"}])
 
@@ -113,12 +114,12 @@ class TestExtractSources:
         assert result[0]["isSearchable"] == 1
 
     def test_search_hits_missing_source_skipped(self):
-        """_source 缺失的 hit 應被略過（不 crash）."""
+        """A hit missing _source should be skipped (no crash)."""
         raw = [
             {"_id": "1", "_source": {"martId": 1}},
-            {"_id": "2"},   # 無 _source
+            {"_id": "2"},   # no _source
         ]
-        # detect_format 會看第一個元素有 _source → search_hits
+        # detect_format sees that the first element has _source → search_hits
         result = self._fn()(raw)
         assert len(result) == 1
         assert result[0]["martId"] == 1
@@ -131,7 +132,7 @@ class TestBuildEmbedText:
         return _mod("embed_products_os.py").build_embed_text
 
     def test_none_fields_produce_no_literal_none(self):
-        """None 欄位不得在輸出中留下字面字串 'None'."""
+        """None fields must not leave the literal string 'None' in the output."""
         source = {
             "martName": "靈芝王",
             "feature": None,
@@ -145,7 +146,7 @@ class TestBuildEmbedText:
         assert "靈芝王" in text
 
     def test_missing_fields_produce_no_literal_none(self):
-        """欄位完全缺失（dict 中無 key）也不得輸出 'None'."""
+        """Fully missing fields (no key in the dict) must also not output 'None'."""
         source = {"martName": "保健品"}
         text = self._fn()(source)
         assert "None" not in text
@@ -168,7 +169,7 @@ class TestBuildEmbedText:
             "feature": "特色  說明   文字",
         }
         text = self._fn()(source)
-        assert "  " not in text  # 不應有連續兩個以上空白
+        assert "  " not in text  # should not have two or more consecutive spaces
 
     def test_truncated_to_50000_chars(self):
         mod = _mod("embed_products_os.py")
@@ -202,11 +203,11 @@ class TestBuildEmbedText:
         assert "飲料" in text
 
     def test_keyword_7pct_null_scenario(self):
-        """模擬約 7% keyword 為 null 的真實情境."""
+        """Simulate the real-world scenario where ~7% of keywords are null."""
         source = {
             "martName": "iPhone 15",
             "feature": "最新款手機",
-            "keyword": None,   # 7% 案例
+            "keyword": None,   # the 7% case
             "categoryLevel1Name": "通訊",
         }
         text = self._fn()(source)
@@ -219,7 +220,7 @@ class TestBuildEmbedText:
         assert text == ""
 
     def test_html_in_feature_fully_removed(self):
-        """純 HTML 的 feature（如只有 tag 無文字）輸出應無 tag 殘留."""
+        """A pure-HTML feature (e.g. only tags, no text) should leave no tag residue in the output."""
         source = {
             "martName": "A",
             "feature": "<div><p></p></div>",
@@ -229,7 +230,7 @@ class TestBuildEmbedText:
         assert ">" not in text
 
 
-# ---------- strip_html 子函式 ----------
+# ---------- strip_html sub-function ----------
 
 class TestStripHtml:
     def _fn(self):
@@ -251,7 +252,7 @@ class TestStripHtml:
         assert "飲品" in result
 
 
-# ---------- golden set loader（approved gate）----------
+# ---------- golden set loader (approved gate) ----------
 
 class TestLoadGoldenSet:
     def _fn(self):
@@ -303,7 +304,7 @@ class TestLoadGoldenSet:
         assert exc_info.value.code != 0
 
     def test_missing_status_exits(self, tmp_path):
-        """meta 存在但無 status 欄位時應拒跑."""
+        """When meta exists but has no status field, it should refuse to run."""
         p = self._write_yaml(
             tmp_path,
             """

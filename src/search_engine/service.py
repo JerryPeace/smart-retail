@@ -1,17 +1,19 @@
-"""SearchService — embed → msearch → min-max score fusion → DTO 編排。
+"""SearchService — orchestrates embed → msearch → min-max score fusion → DTO.
 
-設計取捨（design §8.1 / §5 / §11）：
-- mock 判斷點在 service（對齊 AgentService 既有模式：__init__ 讀 settings.analyzer_mock_mode）。
-- mock mode：_embed_query 直接回 MOCK_QUERY_VECTOR，零 Bedrock 呼叫、零憑證需求。
-- 真 embedding 走 Cohere v4 query embedder 的 aembed_query（embeddings.py，底層以
-  asyncio.to_thread 包同步 boto3 呼叫），不在 event loop 直接跑同步 embed（阻塞 event
-  loop 影響全部 in-flight request）。
-- 候選窗 candidate_k = settings.search_candidate_multiplier × size：給融合更寬的單邊視窗，預設倍數 2。
-- 融合策略：min-max score fusion（w_bm25=settings.search_bm25_weight，現行 0.2）。
-  換 Cohere v4 後從 Titan 時代 0.7 重調——向量腿乾淨、最優權重往向量側移（見 config 註解）。
-  reciprocal_rank_fusion 保留在 fusion.py（不刪，仍被其單元測試覆蓋），service 不再使用。
-- 查無結果回 results=[]、HTTP 200：「搜尋沒中」是正常業務結果不是錯誤。
-- service 回 Pydantic DTO（SearchResponse），不回 raw hit dict。
+Design trade-offs (design §8.1 / §5 / §11):
+- The mock decision point is in the service (aligning with the existing AgentService pattern:
+  __init__ reads settings.analyzer_mock_mode).
+- mock mode: _embed_query returns MOCK_QUERY_VECTOR directly, zero Bedrock calls, zero credential needs.
+- Real embedding goes through the Cohere v4 query embedder's aembed_query (embeddings.py, which
+  wraps the synchronous boto3 call with asyncio.to_thread under the hood), rather than running a
+  synchronous embed directly on the event loop (blocking the event loop would affect all in-flight requests).
+- Candidate window candidate_k = settings.search_candidate_multiplier × size: gives fusion a wider per-side window, default multiplier 2.
+- Fusion strategy: min-max score fusion (w_bm25=settings.search_bm25_weight, currently 0.2).
+  After switching to Cohere v4, retuned from the Titan-era 0.7——the vector leg is clean, so the
+  optimal weight shifts toward the vector side (see config comments).
+  reciprocal_rank_fusion remains in fusion.py (not deleted, still covered by its unit tests); the service no longer uses it.
+- No results returns results=[], HTTP 200: "search found nothing" is a normal business result, not an error.
+- The service returns a Pydantic DTO (SearchResponse), not raw hit dicts.
 """
 from __future__ import annotations
 
@@ -23,21 +25,21 @@ from search_engine.schemas import SearchResponse, SearchResultItem
 
 
 class SearchService:
-    """編排 search 全鏈路：embed → msearch → min-max score fusion → DTO。
+    """Orchestrates the full search chain: embed → msearch → min-max score fusion → DTO.
 
-    職責邊界：
-    - 讀 settings.analyzer_mock_mode 與 settings.search_bm25_weight（service 層讀 config 合法）。
-    - 呼叫 repo.hybrid_msearch 取兩組 raw hits（含 _score）。
-    - 以 min_max_score_fusion 融合排名（w_bm25 可由 settings 調整）。
-    - 將 OpenSearch hit 映射為 SearchResultItem DTO，回 SearchResponse。
-    - 不組 DSL、不碰 HTTP、不拋 HTTPException。
+    Responsibility boundaries:
+    - Reads settings.analyzer_mock_mode and settings.search_bm25_weight (reading config in the service layer is legal).
+    - Calls repo.hybrid_msearch to get the two sets of raw hits (with _score).
+    - Fuses the ranking with min_max_score_fusion (w_bm25 adjustable via settings).
+    - Maps OpenSearch hits to SearchResultItem DTOs and returns a SearchResponse.
+    - Does not build DSL, touch HTTP, or raise HTTPException.
     """
 
     def __init__(self, repo: SearchRepository) -> None:
-        """初始化 SearchService。
+        """Initialize SearchService.
 
         Args:
-            repo: SearchRepository 實例（由 deps.py 注入）。
+            repo: a SearchRepository instance (injected by deps.py).
         """
         self._repo = repo
         self.mock_mode = settings.analyzer_mock_mode
@@ -45,30 +47,30 @@ class SearchService:
     async def search(
         self, query: str, size: int = 10, bm25_weight: float | None = None
     ) -> SearchResponse:
-        """執行 hybrid 搜尋並回 SearchResponse。
+        """Execute a hybrid search and return a SearchResponse.
 
-        BM25 權重解析優先序（高 → 低）：
-        1. bm25_weight 顯式參數（手動覆寫，route_label="manual"）。
-        2. settings.search_bm25_weight（固定預設）。
+        BM25 weight resolution priority (high → low):
+        1. The bm25_weight explicit parameter (manual override, route_label="manual").
+        2. settings.search_bm25_weight (fixed default).
 
         Args:
-            query:       查詢字串。
-            size:        回傳筆數上限（預設 10，router 限制 1–100）。
-            bm25_weight: 手動指定 BM25 權重（0–1）；None 則用固定預設。
+            query:       the query string.
+            size:        max number of results to return (default 10, router limits 1–100).
+            bm25_weight: manually specified BM25 weight (0–1); None uses the fixed default.
 
         Returns:
-            SearchResponse（含 query 原文、results、實際採用權重與判型標籤）。
-            查無結果回 results=[]，不拋例外。
+            A SearchResponse (with the original query, results, the actual weight applied, and the route label).
+            No results returns results=[], does not raise.
         """
         vector = await self._embed_query(query)
-        # 每邊候選窗：settings.search_candidate_multiplier × size。
-        # 預設倍數 2 對齊離線調查（minmax_b70_pool20 在 pool=20 達 rel@10=79 最佳）。
+        # Per-side candidate window: settings.search_candidate_multiplier × size.
+        # The default multiplier 2 aligns with the offline investigation (minmax_b70_pool20 hit the best rel@10=79 at pool=20).
         candidate_k = settings.search_candidate_multiplier * size
 
         knn_hits, bm25_hits = await self._repo.hybrid_msearch(vector, query, candidate_k)
 
-        # 取 (doc_id, raw_score) tuple 供 min-max score fusion
-        # OpenSearch hit 本身帶 _score（不改 repository 簽名）
+        # Extract (doc_id, raw_score) tuples for min-max score fusion
+        # An OpenSearch hit itself carries _score (no need to change the repository signature)
         knn_scored = [(hit["_id"], float(hit.get("_score", 0.0))) for hit in knn_hits]
         bm25_scored = [(hit["_id"], float(hit.get("_score", 0.0))) for hit in bm25_hits]
 
@@ -76,12 +78,12 @@ class SearchService:
         w_knn = 1.0 - w_bm25
         fused = min_max_score_fusion(knn_scored, bm25_scored, w_bm25=w_bm25, w_knn=w_knn)
 
-        # 建 _id → _source map，供融合後 join metadata
+        # Build an _id → _source map for joining metadata after fusion
         id_to_source: dict[str, dict] = {
             hit["_id"]: hit.get("_source", {}) for hit in knn_hits + bm25_hits
         }
 
-        # 取 top-size，映射為 SearchResultItem
+        # Take top-size and map to SearchResultItem
         items: list[SearchResultItem] = []
         for doc_id, fusion_score in fused[:size]:
             source = id_to_source.get(doc_id, {})
@@ -91,8 +93,8 @@ class SearchService:
                     mart_name=source.get("martName", ""),
                     score=fusion_score,
                     brand=source.get("brand") or None,
-                    price=source.get("price"),  # 不可用 `or None`:price=0.0 是合法值會被抹掉
-                    category=source.get("categoryLevel1Name") or None,  # index 欄位是 categoryLevel1Name
+                    price=source.get("price"),  # Don't use `or None`: price=0.0 is a legal value that would be wiped out
+                    category=source.get("categoryLevel1Name") or None,  # the index field is categoryLevel1Name
                 )
             )
 
@@ -106,23 +108,23 @@ class SearchService:
     def _resolve_bm25_weight(
         self, bm25_weight: float | None
     ) -> tuple[float, str | None]:
-        """決定本次融合的 BM25 權重（手動覆寫 > 固定預設）。
+        """Decide this fusion's BM25 weight (manual override > fixed default).
 
         Returns:
-            (w_bm25, route_label)。route_label 為 "manual"（手動覆寫）/ None（固定預設）。
+            (w_bm25, route_label). route_label is "manual" (manual override) / None (fixed default).
         """
         if bm25_weight is not None:
             return bm25_weight, "manual"
         return settings.search_bm25_weight, None
 
     async def _embed_query(self, query: str) -> list[float]:
-        """將查詢字串轉換為向量。
+        """Convert the query string into a vector.
 
-        mock mode：直接回 MOCK_QUERY_VECTOR（零 Bedrock 呼叫）。
-        真實 mode：呼叫 Cohere Embed v4 query embedder（async，不阻塞 event loop）。
+        mock mode: returns MOCK_QUERY_VECTOR directly (zero Bedrock calls).
+        real mode: calls the Cohere Embed v4 query embedder (async, does not block the event loop).
 
         Returns:
-            1536 維 L2 正規化 float 向量（與 doc 端 / 索引 mapping 同維度）。
+            A 1536-dim L2-normalized float vector (same dimension as the doc side / index mapping).
         """
         if self.mock_mode:
             return MOCK_QUERY_VECTOR
@@ -133,5 +135,5 @@ class SearchService:
             profile=settings.aws_profile,
             dimensions=settings.embed_dimensions,
         )
-        # aembed_query：以 asyncio.to_thread 包同步 boto3 Cohere 呼叫，不阻塞 event loop。
+        # aembed_query: wraps the synchronous boto3 Cohere call with asyncio.to_thread, does not block the event loop.
         return await embed.aembed_query(query)

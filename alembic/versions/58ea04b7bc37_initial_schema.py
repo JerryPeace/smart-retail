@@ -38,8 +38,8 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.PrimaryKeyConstraint('id'),
-    # 註: pipeline_job.recommendation_id → recommendation.id 的 FK 在所有表建好後才加
-    # 因為 pipeline_job <-> recommendation 互相 reference,有循環依賴
+    # Note: the FK pipeline_job.recommendation_id → recommendation.id is added only after all tables are created
+    # because pipeline_job <-> recommendation reference each other, creating a circular dependency
     )
     op.create_index(op.f('ix_pipeline_job_created_at'), 'pipeline_job', ['created_at'], unique=False)
     op.create_index(op.f('ix_pipeline_job_customer_id'), 'pipeline_job', ['customer_id'], unique=False)
@@ -109,7 +109,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_evaluation_overall_score'), 'evaluation', ['overall_score'], unique=False)
     op.create_index(op.f('ix_evaluation_recommendation_id'), 'evaluation', ['recommendation_id'], unique=False)
 
-    # === 補上循環 FK: pipeline_job.recommendation_id → recommendation.id ===
+    # === Add the circular FK: pipeline_job.recommendation_id → recommendation.id ===
     op.create_foreign_key(
         'fk_pipeline_job_recommendation_id',
         'pipeline_job', 'recommendation',

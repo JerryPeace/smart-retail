@@ -1,16 +1,16 @@
 """
-P1-5 驗證腳本：對 OpenSearch products_v1 執行 k-NN 與 BM25 並排搜尋，量化向量搜尋價值.
+P1-5 verification script: run k-NN and BM25 side-by-side search against OpenSearch products_v1 to quantify the value of vector search.
 
-輸入  : scripts/etl/golden_set_product_search.yaml（meta.status 必須為 approved）
-        OpenSearch http://localhost:9200 > index "products_v1"（需先完成 P1-4 嵌入）
-        AWS Bedrock (profile=lab, region=ap-northeast-1) amazon.titan-embed-text-v2:0
-輸出  : out/search_eval_{YYYYMMDD}.md（並排比較表 + Summary）
+Input   : scripts/etl/golden_set_product_search.yaml (meta.status must be approved)
+          OpenSearch http://localhost:9200 > index "products_v1" (P1-4 embedding must be done first)
+          AWS Bedrock (profile=lab, region=ap-northeast-1) amazon.titan-embed-text-v2:0
+Output  : out/search_eval_{YYYYMMDD}.md (side-by-side comparison table + Summary)
 
-Gate  : meta.status != approved 時 exit 1 拒跑（程式化強制，不靠自覺）。
-安全  : 約 20 次 query 嵌入，成本忽略不計，但仍是真 Bedrock 呼叫，
-        需與 P1-4 的花費告知一併取得同意（safety.md §1）。
-用法  : uv run python scripts/etl/verify_search_os.py [YYYYMMDD]
-        YYYYMMDD 省略時使用 DATE_PLACEHOLDER（在測試環境下不依賴 datetime.now()）
+Gate    : when meta.status != approved, exit 1 and refuse to run (programmatic enforcement, not reliance on self-discipline).
+Safety  : about 20 query embeds; the cost is negligible, but it is still a real Bedrock call,
+          so consent should be obtained together with the P1-4 cost disclosure (safety.md section 1).
+Usage   : uv run python scripts/etl/verify_search_os.py [YYYYMMDD]
+          when YYYYMMDD is omitted, DATE_PLACEHOLDER is used (so as not to depend on datetime.now() in the test environment)
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# ---------- 常數 ----------
+# ---------- Constants ----------
 
 OS_HOST = "http://localhost:9200"
-INDEX_NAME = os.environ.get("OPENSEARCH_INDEX", "products_v1")  # 可覆寫評估不同索引(如 products_v2)
-# BM25 欄位可由 env 覆寫（v3 評估時帶 .bigram 多欄位）；預設舊 3 欄(v1/v2 相容)
+INDEX_NAME = os.environ.get("OPENSEARCH_INDEX", "products_v1")  # can be overridden to evaluate a different index (e.g. products_v2)
+# BM25 fields can be overridden via env (v3 evaluation carries the .bigram multi-field); defaults to the old 3 fields (v1/v2 compatible)
 BM25_FIELDS = os.environ.get(
     "BM25_FIELDS", "martName,feature,keyword"
 ).split(",")
@@ -36,27 +36,27 @@ BEDROCK_REGION = "ap-northeast-1"
 BEDROCK_MODEL_ID = "amazon.titan-embed-text-v2:0"
 EMBED_DIMENSIONS = 1024
 SEARCH_K = 10
-DATE_PLACEHOLDER = "YYYYMMDD"   # 使用者執行時帶入，e.g. sys.argv[1] 或 env var
+DATE_PLACEHOLDER = "YYYYMMDD"   # supplied by the user at run time, e.g. sys.argv[1] or an env var
 
-# ---------- 純函式：golden set loader（可被測試 import）----------
+# ---------- Pure function: golden set loader (importable by tests) ----------
 
 
 def load_golden_set(path: Path | str = GOLDEN_SET_PATH) -> dict:
-    """載入並驗證 golden set YAML.
+    """Load and validate the golden set YAML.
 
-    Gate：meta.status 必須為 'approved'，否則 print 提示並 sys.exit(1)。
-    此設計是程式化 gate，不靠執行者自覺。
+    Gate: meta.status must be 'approved'; otherwise print a message and sys.exit(1).
+    This design is a programmatic gate, not reliance on the operator's self-discipline.
 
     Args:
-        path: golden set YAML 路徑。
+        path: the golden set YAML path.
 
     Returns:
-        完整 YAML 內容 dict（包含 meta + queries）。
+        the full YAML content dict (including meta + queries).
 
     Side-effects:
-        meta.status != 'approved' 時印提示並呼叫 sys.exit(1)。
+        when meta.status != 'approved', print a message and call sys.exit(1).
     """
-    import yaml  # noqa: PLC0415  (pyyaml 已隨 opensearch-py 或 pre-commit 安裝)
+    import yaml  # noqa: PLC0415  (pyyaml is already installed alongside opensearch-py or pre-commit)
 
     with Path(path).open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -74,17 +74,17 @@ def load_golden_set(path: Path | str = GOLDEN_SET_PATH) -> dict:
     return data
 
 
-# ---------- 可重用查詢函式（Phase 2 的 src/search_engine/service.py 會直接 lift）----------
+# ---------- Reusable query functions (Phase 2's src/search_engine/service.py will lift these directly) ----------
 
 
 def embed_query(text: str) -> list[float]:
-    """將查詢文字嵌入為 1024 維向量（Titan v2，與 doc 端同模型同參數）.
+    """Embed the query text into a 1024-dim vector (Titan v2, same model and params as the doc side).
 
     Args:
-        text: 查詢字串。
+        text: the query string.
 
     Returns:
-        長度 1024 的 float list。
+        a float list of length 1024.
     """
     import boto3  # noqa: PLC0415
 
@@ -104,15 +104,15 @@ def embed_query(text: str) -> list[float]:
 
 
 def knn_search(client: Any, vector: list[float], k: int = SEARCH_K) -> list[dict]:
-    """對 products_v1 執行 k-NN 向量搜尋.
+    """Run a k-NN vector search against products_v1.
 
     Args:
-        client: OpenSearch client instance。
-        vector: 查詢向量（與 doc 端同維度同 normalize）。
-        k: 取 top-k 筆（預設 10）。
+        client: OpenSearch client instance.
+        vector: the query vector (same dimension and normalization as the doc side).
+        k: take the top-k results (default 10).
 
     Returns:
-        list of hit dict（含 _id、_score、_source）。
+        list of hit dicts (including _id, _score, _source).
     """
     query = {
         "size": k,
@@ -130,15 +130,15 @@ def knn_search(client: Any, vector: list[float], k: int = SEARCH_K) -> list[dict
 
 
 def bm25_search(client: Any, query_text: str, k: int = SEARCH_K) -> list[dict]:
-    """對 products_v1 執行 BM25 multi_match 搜尋（martName / feature / keyword）.
+    """Run a BM25 multi_match search against products_v1 (martName / feature / keyword).
 
     Args:
-        client: OpenSearch client instance。
-        query_text: 搜尋查詢字串。
-        k: 取 top-k 筆（預設 10）。
+        client: OpenSearch client instance.
+        query_text: the search query string.
+        k: take the top-k results (default 10).
 
     Returns:
-        list of hit dict（含 _id、_score、_source）。
+        list of hit dicts (including _id, _score, _source).
     """
     query = {
         "size": k,
@@ -153,17 +153,17 @@ def bm25_search(client: Any, query_text: str, k: int = SEARCH_K) -> list[dict]:
     return resp["hits"]["hits"]
 
 
-# ---------- 報告輔助（main guard 內，但邏輯簡單可測）----------
+# ---------- Report helpers (inside the main guard, but simple enough to test) ----------
 
 
 def _hit_at_k(hits: list[dict], expected_mart_ids: list[str]) -> int:
-    """計算 hit@k：expected_mart_ids 在 hits top-k 中命中幾筆."""
+    """Compute hit@k: how many of expected_mart_ids land in the top-k hits."""
     found_ids = {str(h["_id"]) for h in hits}
     return sum(1 for mid in expected_mart_ids if str(mid) in found_ids)
 
 
 def _format_hit_row(rank: int, knn_hit: dict | None, bm25_hit: dict | None) -> str:
-    """格式化並排表一列."""
+    """Format one row of the side-by-side table."""
     def _fmt(hit: dict | None) -> str:
         if hit is None:
             return "—"
@@ -175,7 +175,7 @@ def _format_hit_row(rank: int, knn_hit: dict | None, bm25_hit: dict | None) -> s
     return f"| {rank:4d} | {_fmt(knn_hit):<45} | {_fmt(bm25_hit):<45} |"
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 
 
 def main() -> None:
@@ -185,7 +185,7 @@ def main() -> None:
     out_path = OUT_DIR / f"search_eval_{date_str}.md"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Gate：status check（load_golden_set 內部 exit 1）
+    # Gate: status check (load_golden_set exits 1 internally)
     golden = load_golden_set(GOLDEN_SET_PATH)
     queries = golden.get("queries", [])
     print(f"Golden set loaded：{len(queries)} 條查詢")
@@ -251,7 +251,7 @@ def main() -> None:
             win = knn_hit >= 1 and bm25_hit == 0
             lines.append(f"  → {'**vector-only win ✅**' if win else 'not a clear vector win'}")
 
-    # 分類污染示範（固定加跑）
+    # Category-contamination demo (always run in addition)
     lines.append("\n## 分類污染示範（category filter vs 純向量）\n")
     lines.append(
         "查詢：「保健食品」，加 categoryLevel1Name=「保健食品」filter vs 純向量搜尋\n"
@@ -259,7 +259,7 @@ def main() -> None:
     demo_query = "保健食品"
     demo_vector = embed_query(demo_query)
 
-    # 加 filter 搜尋（可能漏掉 category=品牌名 的商品）
+    # Filtered search (may miss products whose category=brand name)
     filter_query = {
         "size": SEARCH_K,
         "query": {
@@ -279,7 +279,7 @@ def main() -> None:
     }
     filter_hits = os_client.search(index=INDEX_NAME, body=filter_query)["hits"]["hits"]
 
-    # 純向量搜尋（無 filter）
+    # Pure vector search (no filter)
     pure_knn_hits = knn_search(os_client, demo_vector, k=SEARCH_K)
 
     lines.append(f"| rank | filter+向量 top-{SEARCH_K}{' ' * 30} | 純向量 top-{SEARCH_K}{' ' * 31} |")

@@ -1,13 +1,13 @@
 #!/bin/bash
 # ===================================================================
-# 把 AWS lab profile 的暫時憑證寫進 .env.local
-# 用法: ./scripts/refresh-lab-creds.sh
+# Write the AWS lab profile's temporary credentials into .env.local
+# Usage: ./scripts/refresh-lab-creds.sh
 #
-# 為什麼需要這個:
-#   boto3 在 Python 跑時無法觸發互動式 MFA prompt,所以不能直接用 AWS_PROFILE。
-#   必須先在 shell 用 aws CLI(已 cached MFA)export 暫時憑證,寫進 .env.local 給 FastAPI 用。
+# Why this is needed:
+#   When running in Python, boto3 cannot trigger an interactive MFA prompt, so AWS_PROFILE can't be used directly.
+#   You must first export the temporary credentials in the shell via the aws CLI (with MFA already cached), writing them into .env.local for FastAPI to use.
 #
-#   暫時憑證有效期通常 1-12 小時,過期就重跑這支。
+#   Temporary credentials are usually valid for 1-12 hours; re-run this once they expire.
 # ===================================================================
 set -euo pipefail
 
@@ -18,7 +18,7 @@ ENV_FILE=".env.local"
 
 echo "==> Exporting credentials from profile: $PROFILE"
 
-# 取憑證(用 eval 把 export 命令當變數讀進來)
+# Fetch credentials (use eval to read the export commands in as variables)
 CREDS=$(aws configure export-credentials --profile "$PROFILE" --format env 2>&1)
 if [ $? -ne 0 ]; then
     echo "❌ Failed to export credentials. 確認:"
@@ -27,16 +27,16 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 解析每個 export
+# Parse each export
 ACCESS_KEY=$(echo "$CREDS" | grep AWS_ACCESS_KEY_ID | cut -d= -f2)
 SECRET_KEY=$(echo "$CREDS" | grep AWS_SECRET_ACCESS_KEY | cut -d= -f2)
 SESSION_TOKEN=$(echo "$CREDS" | grep AWS_SESSION_TOKEN | cut -d= -f2)
 EXPIRATION=$(echo "$CREDS" | grep AWS_CREDENTIAL_EXPIRATION | cut -d= -f2)
 
-# 移除 .env.local 既有的 AWS_ACCESS_KEY_ID / SECRET / SESSION_TOKEN / EXPIRATION
+# Remove the existing AWS_ACCESS_KEY_ID / SECRET / SESSION_TOKEN / EXPIRATION from .env.local
 sed -i.bak '/^AWS_ACCESS_KEY_ID=/d;/^AWS_SECRET_ACCESS_KEY=/d;/^AWS_SESSION_TOKEN=/d;/^AWS_CREDENTIAL_EXPIRATION=/d' "$ENV_FILE"
 
-# 加進新的(在 AWS_PROFILE 行之後)
+# Append the new ones (after the AWS_PROFILE line)
 {
     echo ""
     echo "# Auto-injected by scripts/refresh-lab-creds.sh @ $(date -u +%Y-%m-%dT%H:%M:%SZ)"

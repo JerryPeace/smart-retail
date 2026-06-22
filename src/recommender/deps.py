@@ -1,7 +1,7 @@
-"""DI providers — 集中管理所有依賴注入
+"""DI providers — centralized management of all dependency injection.
 
-FastAPI 用 `Depends()` 機制,這個檔是唯一管 wiring 的地方。
-NestJS 對應概念: Module + Provider。
+FastAPI uses the `Depends()` mechanism; this file is the single place that manages wiring.
+Corresponding NestJS concept: Module + Provider.
 """
 from __future__ import annotations
 
@@ -107,13 +107,13 @@ def get_evaluation_service(
 EvaluationServiceDep = Annotated[EvaluationService, Depends(get_evaluation_service)]
 
 
-# === Search (OpenSearch 領域模組，唯一 wiring 點) ===
+# === Search (OpenSearch domain module, the single wiring point) ===
 
 OSClientDep = Annotated["AsyncOpenSearch", Depends(get_opensearch_client)]
 
 
 def get_search_repository(os_client: OSClientDep) -> SearchRepository:
-    """建 SearchRepository，注入 os_client 與 opensearch_index。"""
+    """Build SearchRepository, injecting os_client and opensearch_index."""
     return SearchRepository(os_client, index=settings.opensearch_index)
 
 
@@ -121,7 +121,7 @@ SearchRepoDep = Annotated[SearchRepository, Depends(get_search_repository)]
 
 
 def get_search_service(repo: SearchRepoDep) -> SearchService:
-    """建 SearchService，注入 SearchRepository。"""
+    """Build SearchService, injecting SearchRepository."""
     return SearchService(repo)
 
 

@@ -1,11 +1,11 @@
 """
-Tier 1 ETL: 從 本公司 績效追蹤 xlsx 「同期by經銷商」 sheet 彙整出 prompt 要的格式.
+Tier 1 ETL: aggregate the company's performance-tracking xlsx "同期by經銷商" sheet into the format the prompt expects.
 
-輸入  : aws-s3/績效追蹤{月}.xlsx  (此 POC 寫死 4 月)
-輸出  : out/aggregated_{YYYY-MM}.csv  (6 品類 × 4 區域 = 24 行)
+Input   : aws-s3/績效追蹤{月}.xlsx  (this POC hardcodes April)
+Output  : out/aggregated_{YYYY-MM}.csv  (6 categories x 4 regions = 24 rows)
 
-策略  : 演算法優先, 確定性運算. 月份格式變動時 fallback 到 LLM tier (尚未實作).
-用法  : uv run python scripts/etl/aggregate_monthly.py
+Strategy: algorithm-first, deterministic computation. Falls back to the LLM tier when the monthly format drifts (not yet implemented).
+Usage   : uv run python scripts/etl/aggregate_monthly.py
 """
 
 from __future__ import annotations
@@ -14,43 +14,43 @@ from pathlib import Path
 
 import pandas as pd
 
-# ---------- 業務 mapping (調整這幾個 dict 即可改規則) ----------
+# ---------- business mapping (change the rules by adjusting these few dicts) ----------
 
-# 來源 sheet col index → prompt 6 品類
-# 每個品類佔 4 欄: [當月銷量, 當月銷貨淨額, 上月同期銷貨淨額, 去年同期銷貨淨額]
-# 我們只取 "當月銷貨淨額"
+# source sheet col index → the 6 prompt categories
+# each category spans 4 columns: [this month's units, this month's net sales, same period last month's net sales, same period last year's net sales]
+# we take only "this month's net sales"
 CATEGORY_COL_MAP: dict[int, str] = {
-    6: "通訊",   # 行動電話 當月銷貨淨額
-    34: "通訊",  # 平板商品類 -> 預設併入通訊
-    38: "資訊",  # 資訊商品類
-    42: "家電",  # 家電商品類
-    46: "配件",  # 應用週邊商品類 -> 配件
-    50: "二手機",  # 二手回收類
-    54: "保健",  # 保健.保養
+    6: "通訊",   # mobile phones, this month's net sales
+    34: "通訊",  # tablet category -> merged into telecom by default
+    38: "資訊",  # IT category
+    42: "家電",  # home appliances category
+    46: "配件",  # peripherals category -> accessories
+    50: "二手機",  # pre-owned/recycling category
+    54: "保健",  # health & wellness
 }
 
-# 課別 (col 0) → prompt 4 區
+# section (col 0) → the 4 prompt regions
 REGION_MAP: dict[str, str] = {
     "北區通路課": "北",
     "中區通路課": "中",
     "南區通路課": "南",
     "專戶業務課": "專戶",
-    "企業客戶業務處": "專戶",  # 預設併入專戶
+    "企業客戶業務處": "專戶",  # merged into key accounts by default
 }
 
 PROMPT_REGIONS = ["北", "中", "南", "專戶"]
 PROMPT_CATEGORIES = ["通訊", "資訊", "配件", "家電", "保健", "二手機"]
 
-# ---------- Sheet 結構常數 ----------
-DATA_START_ROW = 5  # row 0=雜訊, row 1-3=multi-level header, row 4=合計列
-REGION_COL = 0  # 單位 (課別)
-DEALER_ID_COL = 1  # 經銷業務數字 ID
+# ---------- sheet structure constants ----------
+DATA_START_ROW = 5  # row 0=noise, row 1-3=multi-level header, row 4=totals row
+REGION_COL = 0  # unit (section)
+DEALER_ID_COL = 1  # dealer numeric ID
 
-# ---------- 主邏輯 ----------
+# ---------- main logic ----------
 
 
 def load_dealer_records(xlsx_path: Path, sheet: str = "同期by經銷商") -> pd.DataFrame:
-    """讀 raw, 跳過 header + 合計列, 展開成長表格 (region, category, dealer_id, amount)."""
+    """Read the raw sheet, skip the header + totals rows, and unpivot into a long table (region, category, dealer_id, amount)."""
     df = pd.read_excel(xlsx_path, sheet_name=sheet, header=None)
     df = df.iloc[DATA_START_ROW:].reset_index(drop=True)
 
@@ -70,7 +70,7 @@ def load_dealer_records(xlsx_path: Path, sheet: str = "同期by經銷商") -> pd
         for col_idx, category in CATEGORY_COL_MAP.items():
             amount = row[col_idx]
             if pd.isna(amount) or float(amount) <= 0:
-                continue  # 0 或負銷售不算一筆
+                continue  # zero or negative sales don't count as a record
             records.append(
                 {
                     "region": region,
@@ -86,12 +86,12 @@ def load_dealer_records(xlsx_path: Path, sheet: str = "同期by經銷商") -> pd
     df = pd.DataFrame(records)
     if df.empty:
         return df
-    # 同一 (region, category, dealer) 的多個來源欄位 (例: 行動電話 + 平板都算通訊) 合併
+    # merge multiple source columns mapping to the same (region, category, dealer) (e.g. mobile phones + tablets both count as telecom)
     return df.groupby(["region", "category", "dealer_id"], as_index=False)["amount"].sum()
 
 
 def aggregate(records: pd.DataFrame) -> pd.DataFrame:
-    """聚合到 (region, category) 層級 + 補零組合."""
+    """Aggregate to the (region, category) level and fill in zero-valued combinations."""
     grouped = (
         records.groupby(["region", "category"])
         .agg(

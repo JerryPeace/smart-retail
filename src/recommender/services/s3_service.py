@@ -1,9 +1,9 @@
-"""S3Service — 讀寫 S3 的薄包裝
+"""S3Service — thin wrapper for reading and writing S3
 
-設計原則:
-  - 只負責 I/O (讀 / 寫 / 列出),不做任何資料轉換
-  - 自動處理 LocalStack vs 真 AWS (透過 settings.aws_endpoint_url_s3)
-  - async (aioboto3) 配合 FastAPI async stack
+Design principles:
+  - Handles only I/O (read / write / list), no data transformation
+  - Automatically handles LocalStack vs real AWS (via settings.aws_endpoint_url_s3)
+  - async (aioboto3) to fit the FastAPI async stack
 """
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -15,16 +15,17 @@ from recommender.config import settings
 
 class S3Service:
     def __init__(self) -> None:
-        # 不指定 access key — 讓 boto3 自動從 AWS_PROFILE 環境變數
-        # 或 ~/.aws/credentials 讀取(支援 lab role 暫時憑證 / IAM role / API key 各種來源)
-        # LocalStack 不檢查實際憑證,所以 lab role 也能呼叫 LocalStack S3
+        # Don't specify an access key — let boto3 read it automatically from the
+        # AWS_PROFILE environment variable or ~/.aws/credentials (supports lab role
+        # temporary credentials / IAM role / API key, from any source).
+        # LocalStack doesn't check actual credentials, so a lab role can call LocalStack S3 too.
         self._session = aioboto3.Session(region_name=settings.aws_region)
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator:
         async with self._session.client(
             "s3",
-            endpoint_url=settings.aws_endpoint_url_s3,  # None → 走真 AWS;設了走 LocalStack
+            endpoint_url=settings.aws_endpoint_url_s3,  # None → use real AWS; if set, use LocalStack
         ) as client:
             yield client
 

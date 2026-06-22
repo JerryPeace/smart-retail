@@ -1,14 +1,15 @@
-"""Reciprocal Rank Fusion 與 Min-Max Score Fusion 純函式。
+"""Pure functions for Reciprocal Rank Fusion and Min-Max Score Fusion.
 
-設計取捨（design §7 / §11）：
-- reciprocal_rank_fusion：吃 Sequence[Sequence[str]]（doc id 清單）而非 raw hits——
-  零 OpenSearch 型別耦合，單元測試餵字串清單即可，無需模擬 OpenSearch 回應結構。
-- min_max_score_fusion：吃 [(doc_id, raw_score), ...]（每路帶 _score 的 hit tuple）——
-  對齊 investigate_hybrid_fusion.py 的 minmax_fusion 語意（per-query per-path 正規化）。
-- metadata join（martName、price…）是 service 的職責，不在此處。
-- k=60 為 RRF 原始論文與業界慣例預設值；不開放到 API query string。
-- 同分以 doc_id 字典序 tie-break，保證結果 deterministic（測試可重現、線上穩定）。
-- 空清單 / 單邊缺漏合法：缺席的清單就是不貢獻分數。
+Design trade-offs (design §7 / §11):
+- reciprocal_rank_fusion: takes Sequence[Sequence[str]] (lists of doc ids) rather than raw hits——
+  zero OpenSearch type coupling; unit tests just feed lists of strings, no need to mock the
+  OpenSearch response structure.
+- min_max_score_fusion: takes [(doc_id, raw_score), ...] (per-path hit tuples carrying _score)——
+  aligns with the minmax_fusion semantics in investigate_hybrid_fusion.py (per-query per-path normalization).
+- metadata join (martName, price…) is the service's responsibility, not done here.
+- k=60 is the default from the original RRF paper and industry convention; not exposed in the API query string.
+- Ties are broken by doc_id lexicographic order, guaranteeing deterministic results (reproducible tests, stable in prod).
+- Empty lists / one-sided gaps are legal: an absent list simply contributes no score.
 """
 from __future__ import annotations
 
@@ -20,19 +21,19 @@ def reciprocal_rank_fusion(
     result_lists: Sequence[Sequence[str]],
     k: int = 60,
 ) -> list[tuple[str, float]]:
-    """將多路已排序 doc id 清單以 RRF 公式融合成單一排名。
+    """Fuse multiple sorted doc id lists into a single ranking using the RRF formula.
 
-    公式：score(doc) = Σ_lists 1 / (k + rank)，rank 從 1 起算。
+    Formula: score(doc) = Σ_lists 1 / (k + rank), where rank starts at 1.
 
     Args:
-        result_lists: 每個元素是「已排序的 doc id 清單」（最相關排前）。
-                      可包含空清單；空清單不貢獻任何分數（合法）。
-        k:            RRF 平滑常數，預設 60（論文慣例）。較小的 k 讓高排名文件
-                      優勢更明顯；較大的 k 使分數更平坦。
+        result_lists: each element is a "sorted list of doc ids" (most relevant first).
+                      May include empty lists; an empty list contributes no score (legal).
+        k:            RRF smoothing constant, default 60 (paper convention). A smaller k
+                      gives top-ranked documents a stronger advantage; a larger k flattens scores.
 
     Returns:
-        依 score 降序排列的 (doc_id, score) list。
-        同分 doc 以 doc_id 字典序升序 tie-break（保證 deterministic）。
+        A list of (doc_id, score) sorted by score descending.
+        Tied docs are broken by doc_id lexicographic ascending order (guarantees determinism).
     """
     scores: dict[str, float] = defaultdict(float)
 
@@ -40,7 +41,7 @@ def reciprocal_rank_fusion(
         for rank, doc_id in enumerate(ranked_list, start=1):
             scores[doc_id] += 1.0 / (k + rank)
 
-    # 降序排分；同分以 doc_id 字典序升序（tie-break deterministic）
+    # Sort by score descending; ties broken by doc_id lexicographic ascending (deterministic tie-break)
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
 
 
@@ -50,39 +51,39 @@ def min_max_score_fusion(
     w_bm25: float,
     w_knn: float,
 ) -> list[tuple[str, float]]:
-    """Min-Max Score Fusion：對每路 raw _score 做 per-query 正規化後加權合併。
+    """Min-Max Score Fusion: per-query normalize each path's raw _score, then weighted-merge.
 
-    語意對齊 scripts/etl/investigate_hybrid_fusion.py 的 minmax_fusion 函式，
-    確保 prod 結果與離線調查的 rel@10=79 一致。
+    Semantically aligned with the minmax_fusion function in scripts/etl/investigate_hybrid_fusion.py,
+    ensuring prod results match the offline investigation's rel@10=79.
 
-    正規化規則（per-path）：
-    - 若路內只有一個 doc 或所有 doc 的 _score 完全相同（hi == lo），
-      正規化為 1.0（對齊 investigate 腳本的「全同分回 1.0」）。
-    - 空路（hits=[]）不貢獻任何分數（缺席 = 0.0）。
+    Normalization rules (per-path):
+    - If a path has only one doc or all docs have identical _score (hi == lo),
+      normalize to 1.0 (aligning with the investigate script's "all-equal returns 1.0").
+    - An empty path (hits=[]) contributes no score (absent = 0.0).
 
-    融合公式：
+    Fusion formula:
         fused_score(doc) = w_knn * norm_knn_score + w_bm25 * norm_bm25_score
-    某 doc 不在某路時，該路貢獻 0.0。
+    When a doc is not in a given path, that path contributes 0.0.
 
     Args:
-        knn_scored:  k-NN 路的 [(doc_id, raw_score), ...]，依 OpenSearch 回傳順序。
-        bm25_scored: BM25 路的 [(doc_id, raw_score), ...]，依 OpenSearch 回傳順序。
-        w_bm25:      BM25 路的加權係數（例如 0.7）。
-        w_knn:       k-NN 路的加權係數（例如 0.3；通常 = 1 - w_bm25）。
+        knn_scored:  the k-NN path's [(doc_id, raw_score), ...], in OpenSearch return order.
+        bm25_scored: the BM25 path's [(doc_id, raw_score), ...], in OpenSearch return order.
+        w_bm25:      the BM25 path's weighting coefficient (e.g. 0.7).
+        w_knn:       the k-NN path's weighting coefficient (e.g. 0.3; usually = 1 - w_bm25).
 
     Returns:
-        依融合分降序排列的 (doc_id, fused_score) list。
-        同分 doc 以 doc_id 字典序升序 tie-break（保證 deterministic）。
+        A list of (doc_id, fused_score) sorted by fused score descending.
+        Tied docs are broken by doc_id lexicographic ascending order (guarantees determinism).
     """
 
     def _normalize(scored: list[tuple[str, float]]) -> dict[str, float]:
-        """對單路做 min-max 正規化，回 {doc_id: norm_score}。"""
+        """Min-max normalize a single path, returning {doc_id: norm_score}."""
         if not scored:
             return {}
         vals = [s for _, s in scored]
         lo, hi = min(vals), max(vals)
         if hi == lo:
-            # 全同分（含只有單一 doc）→ 一律正規化為 1.0（對齊 investigate 腳本）
+            # All-equal scores (including a single doc) → always normalize to 1.0 (aligns with investigate script)
             return {doc_id: 1.0 for doc_id, _ in scored}
         return {doc_id: (s - lo) / (hi - lo) for doc_id, s in scored}
 
@@ -95,5 +96,5 @@ def min_max_score_fusion(
     for doc_id, v in norm_bm25.items():
         fused[doc_id] += w_bm25 * v
 
-    # 降序排分；同分以 doc_id 字典序升序（tie-break deterministic）
+    # Sort by score descending; ties broken by doc_id lexicographic ascending (deterministic tie-break)
     return sorted(fused.items(), key=lambda item: (-item[1], item[0]))

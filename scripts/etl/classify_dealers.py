@@ -1,16 +1,16 @@
 """
-Tier 1 ETL: 從 本公司 績效追蹤 xlsx 「同期by經銷商」 sheet 把經銷商按當月成交分層.
+Tier 1 ETL: tier dealers by this month's transaction volume from the company's performance-tracking xlsx "同期by經銷商" sheet.
 
-輸入  : aws-s3/績效追蹤{月}.xlsx
-輸出  : out/dealer_classification_{YYYY-MM}.csv  + 升降級清單 print
+Input   : aws-s3/績效追蹤{月}.xlsx
+Output  : out/dealer_classification_{YYYY-MM}.csv  + printed upgrade/downgrade list
 
-分層規則 (簡化版, 用當月而非近三月月均):
-  S: 當月 >= 50 萬
-  A: 10-50 萬
-  B: 3-10 萬
-  C: < 3 萬
+Tiering rules (simplified version, using this month rather than a trailing-3-month average):
+  S: this month >= 500K
+  A: 100K-500K
+  B: 30K-100K
+  C: < 30K
 
-層級變動: 比對 (當月) vs (上月同期), 找出升級/降級的經銷商.
+Tier change: compare (this month) vs (same period last month) to find upgraded/downgraded dealers.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
-# ---------- 欄位 mapping ----------
-# 7 個品類的銷貨淨額 col index. pattern: 當月 col + 1 = 上月同期 col
+# ---------- column mapping ----------
+# net-sales col indexes for the 7 categories. pattern: this-month col + 1 = same-period-last-month col
 CATEGORY_THIS_MONTH_COLS = [6, 34, 38, 42, 46, 50, 54]
 CATEGORY_LAST_MONTH_COLS = [c + 1 for c in CATEGORY_THIS_MONTH_COLS]
 
@@ -32,7 +32,7 @@ REGION_MAP: dict[str, str] = {
     "企業客戶業務處": "專戶",
 }
 
-# 層級門檻 (元)
+# tier thresholds (NTD)
 TIER_THRESHOLDS = [
     (500_000, "S"),
     (100_000, "A"),
@@ -41,7 +41,7 @@ TIER_THRESHOLDS = [
 ]
 TIER_WEIGHT = {"S": 4, "A": 3, "B": 2, "C": 1}
 
-# 對應動作 (PO 官方規則 2026-05-06 拍板)
+# corresponding actions (official PO rules, finalized 2026-05-06)
 DEFAULT_CHANNEL: dict[str, str] = {
     "S": "業務電話 + 客製 EDM",
     "A": "標準 EDM + LINE",
@@ -124,7 +124,7 @@ def main() -> None:
 
     active = totals[totals["this_month_amount"] > 0].copy()
     active["channel"] = active["this_tier"].map(DEFAULT_CHANNEL)
-    active["tax_id"] = ""  # POC 階段空著, 待 IT 提供客戶 master 補 8 碼統編
+    active["tax_id"] = ""  # left blank during the POC phase; pending IT providing the customer master to fill in the 8-digit tax ID
 
     main_table = (
         active[["dealer_name", "tax_id", "region", "this_month_amount", "this_tier", "channel"]]

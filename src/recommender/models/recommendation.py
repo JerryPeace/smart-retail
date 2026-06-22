@@ -1,4 +1,4 @@
-"""Recommendation — Bedrock LLM agent 產出的銷售建議"""
+"""Recommendation — sales recommendations produced by the Bedrock LLM agent."""
 from datetime import datetime
 
 from recommender.timeutil import utcnow
@@ -22,11 +22,11 @@ class Recommendation(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     customer_id: str = Field(index=True)
 
-    # === Hot columns (從 payload 抽出,加 index 方便查詢) ===
+    # === Hot columns (extracted from payload, indexed for easy querying) ===
     customer_segment: str | None = Field(default=None, index=True)
     confidence_score: float | None = Field(default=None, index=True)
 
-    # === Cold JSONB (single source of truth: agent 完整輸出) ===
+    # === Cold JSONB (single source of truth: the agent's full output) ===
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
     # === Schema versioning ===
@@ -38,7 +38,7 @@ class Recommendation(SQLModel, table=True):
     output_tokens: int | None = None
     latency_ms: int | None = None
 
-    # === A/B testing — 哪個 prompt variant 產出這份結果 ===
+    # === A/B testing — which prompt variant produced this result ===
     prompt_variant_id: int | None = Field(
         default=None, foreign_key="prompt_variant.id", index=True
     )
@@ -47,7 +47,7 @@ class Recommendation(SQLModel, table=True):
     generated_at: datetime = Field(default_factory=utcnow, index=True)
     pipeline_job_id: int | None = Field(default=None, foreign_key="pipeline_job.id")
 
-    # === HubSpot sync 狀態 (Phase 4 才會用) ===
+    # === HubSpot sync status (only used in Phase 4) ===
     hubspot_sync_status: HubSpotSyncStatus = Field(
         default=HubSpotSyncStatus.pending, index=True
     )

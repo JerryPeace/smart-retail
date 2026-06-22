@@ -1,9 +1,9 @@
 #!/bin/bash
 # ===================================================================
-# 一鍵啟動本地開發環境
-# - 起 docker infra (postgres/redis/localstack/adminer)
-# - 跑 alembic migration
-# - 啟動 FastAPI (uvicorn --reload)
+# One-command startup for the local development environment
+# - Bring up docker infra (postgres/redis/localstack/adminer)
+# - Run alembic migration
+# - Start FastAPI (uvicorn --reload)
 # ===================================================================
 set -euo pipefail
 
@@ -42,8 +42,8 @@ echo "    LocalStack:  localhost:4567"
 echo "    Adminer:     http://localhost:8081"
 echo ""
 
-# 清殭屍：上次 make dev 沒乾淨退出時，uvicorn reloader/worker 可能還佔著 port
-# （Errno 48 Address already in use）。啟動前先清掉佔 port 者 + 殘留 uvicorn 孤兒。
+# Reap zombies: if the last `make dev` didn't exit cleanly, the uvicorn reloader/worker may still hold the port
+# (Errno 48 Address already in use). Before starting, clear whoever holds the port + leftover orphaned uvicorn processes.
 DEV_PORT="${PORT:-8000}"
 STALE_PIDS="$(lsof -nP -iTCP:"$DEV_PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
 ORPHAN_PIDS="$(pgrep -f 'uvicorn recommender.main' 2>/dev/null || true)"

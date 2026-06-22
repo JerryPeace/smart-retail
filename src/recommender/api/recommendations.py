@@ -1,4 +1,4 @@
-"""Recommendation endpoints — 查詢 LLM 產出"""
+"""Recommendation endpoints — query LLM output."""
 from fastapi import APIRouter, Query
 
 from recommender.deps import RecommendationServiceDep
@@ -16,6 +16,6 @@ async def get_recommendation(rec_id: int, service: RecommendationServiceDep):
 async def list_by_customer(
     customer_id: str,
     service: RecommendationServiceDep,
-    limit: int = Query(default=20, ge=1, le=100),  # review #4:上限 100,擋全表掃
+    limit: int = Query(default=20, ge=1, le=100),  # review #4: cap at 100 to prevent full-table scans
 ):
     return await service.list_by_customer(customer_id, limit=limit)

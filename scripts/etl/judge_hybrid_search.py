@@ -1,71 +1,71 @@
 """
-Hybrid 搜尋準確度評估腳本：三路並排比較（hybrid / k-NN-only / BM25-only）.
+Hybrid search accuracy evaluation script: three-way side-by-side comparison (hybrid / k-NN-only / BM25-only).
 
-背景
-----
-Phase 2 已實作 `/search` hybrid 端點（BM25 + k-NN，應用端 RRF 融合）。
-本腳本評估 hybrid 是否優於/不劣於單一方法，重用 Phase 1 的 golden set 與
-judge_search_relevance.py 的 LLM-judge 量尺。
+Background
+----------
+Phase 2 has implemented the `/search` hybrid endpoint (BM25 + k-NN, with RRF fusion on the application side).
+This script evaluates whether hybrid is better than / no worse than a single method, reusing the Phase 1 golden set
+and the LLM-judge scale from judge_search_relevance.py.
 
-輸入
-----
-- scripts/etl/golden_set_product_search.yaml（meta.status 必須為 approved）
-- 運行中的 app（mock OFF）：GET http://localhost:8000/search?q=<query>&size=10
-  取 hybrid top-10（app 必須先以 ANALYZER_MOCK_MODE=false 啟動）
-- OpenSearch http://localhost:9200 > index "products_v1"（k-NN-only / BM25-only 直打）
-- AWS Bedrock（profile=lab, region=ap-northeast-1）
-  judge 模型：jp.anthropic.claude-opus-4-5（Opus 級，可用 JUDGE_MODEL_ID 環境變數覆寫）
-  embed 模型：amazon.titan-embed-text-v2:0（重用 verify_search_os.embed_query）
+Inputs
+------
+- scripts/etl/golden_set_product_search.yaml (meta.status must be approved)
+- A running app (mock OFF): GET http://localhost:8000/search?q=<query>&size=10
+  to fetch hybrid top-10 (the app must first be started with ANALYZER_MOCK_MODE=false)
+- OpenSearch http://localhost:9200 > index "products_v1" (k-NN-only / BM25-only queried directly)
+- AWS Bedrock (profile=lab, region=ap-northeast-1)
+  judge model: jp.anthropic.claude-opus-4-5 (Opus tier, overridable via the JUDGE_MODEL_ID environment variable)
+  embed model: amazon.titan-embed-text-v2:0 (reuses verify_search_os.embed_query)
 
-輸出
-----
-out/search_eval_hybrid_{YYYYMMDD}.md（三欄並排 hybrid/knn/bm25 + Summary 兩項判定）
+Output
+------
+out/search_eval_hybrid_{YYYYMMDD}.md (three side-by-side columns hybrid/knn/bm25 + two Summary verdicts)
 
-成功標準（design §10.3 / task 7.3）
+Success criteria (design §10.3 / task 7.3)
 ---------------------------------------
-(a) 全局：hybrid 總相關數 ≥ max(knn-only 總相關數, bm25-only 總相關數)
-(b) 互補保留：
-    - 向量強項 query（情境式，如 q11/q13）hybrid 相關數不歸零（hybrid_rel ≥ 1）
-    - BM25 強項 query（q04 ThinkPad）hybrid 相關數不歸零（hybrid_rel ≥ 1）
-兩項均達標 → 判定 ✅；任一未達 → 如實標 ❌，不調寬標準。
+(a) Global: total hybrid relevant count >= max(total knn-only relevant count, total bm25-only relevant count)
+(b) Complementarity preserved:
+    - Vector-strong queries (contextual, e.g. q11/q13) hybrid relevant count must not drop to zero (hybrid_rel >= 1)
+    - BM25-strong queries (q04 ThinkPad) hybrid relevant count must not drop to zero (hybrid_rel >= 1)
+Both met -> verdict ✅; if either fails -> honestly mark ❌, do not loosen the criteria.
 
-成本估算
+Cost estimate
 --------
-- 15 query × embed（Titan v2）：45 次嵌入（僅 k-NN 路徑）
-- hybrid top-10 × 15 query：打 app /search 端點（不費 Bedrock，app 自行嵌入）
-- k-NN + BM25 直打 OpenSearch：30 次查詢（無 Bedrock 費用）
-- judge：15 query × 平均 ~17 unique 商品（三路聯集去重）≈ 255 次 Opus 呼叫
-  Opus：input ~$15/M token，output ~$75/M token，每次呼叫約 ~300 token
-  255 × 300 token ≈ 76,500 token ≈ 估計 < $2（Opus 級）
-  全部費用量級 < $2，仍是真 Bedrock ——「執行前必須取得使用者同意（safety.md §1）」
-- mget 補抓 hybrid-only doc source：最多 15 × SEARCH_K 次 mget（0 Bedrock 費用，OpenSearch only）
+- 15 queries × embed (Titan v2): 45 embeddings (k-NN path only)
+- hybrid top-10 × 15 queries: hits the app /search endpoint (no Bedrock cost, the app embeds on its own)
+- k-NN + BM25 queried directly against OpenSearch: 30 queries (no Bedrock cost)
+- judge: 15 queries × on average ~17 unique products (deduplicated union of the three paths) ≈ 255 Opus calls
+  Opus: input ~$15/M token, output ~$75/M token, ~300 tokens per call
+  255 × 300 tokens ≈ 76,500 tokens ≈ estimated < $2 (Opus tier)
+  Total cost is on the order of < $2, but it is still real Bedrock — "user consent must be obtained before running (safety.md §1)"
+- mget to backfill hybrid-only doc source: at most 15 × SEARCH_K mget calls (0 Bedrock cost, OpenSearch only)
 
-source_map artifact 修正說明
+source_map artifact fix note
 -----------------------------
-原始實作 _build_source_map(knn_hits + bm25_hits) 只涵蓋兩路 top-SEARCH_K 的 doc。
-hybrid 融合後若某 doc 排入 top-SEARCH_K 但在兩路中均排名更深（rank > SEARCH_K），
-則該 doc 的 source 在 source_map 中缺失（空白商品名/feature）→ judge 看不到資訊 → 自動判不相關。
-修正：Phase 1 取完三路 hits 後，對三路聯集中 source_map 缺失的 mart_id 發一次 mget 批次補抓，
-確保每筆 judge item 都有完整商品資訊（_enrich_source_map_with_mget）。
+The original implementation _build_source_map(knn_hits + bm25_hits) only covered the top-SEARCH_K docs of the two paths.
+After hybrid fusion, if a doc enters the top-SEARCH_K but ranks deeper in both paths (rank > SEARCH_K),
+then that doc's source is missing from source_map (blank product name/feature) -> the judge sees no information -> automatically judged irrelevant.
+Fix: after fetching the three paths' hits in Phase 1, issue a single mget batch to backfill the mart_ids missing from source_map across the union of the three paths,
+ensuring every judge item has complete product information (_enrich_source_map_with_mget).
 
-safety 告知要求
+safety disclosure requirement
 ---------------
-本腳本打真 Bedrock（embed + judge），執行前「必須」向使用者告知預估成本並取得同意
-（safety.md §1：真 Bedrock 呼叫前明示成本）。
-執行前確認：
-  1. app 已以 ANALYZER_MOCK_MODE=false 啟動（localhost:8000 健康）
-  2. OpenSearch 在線（localhost:9200 可達）
-  3. AWS lab 憑證有效（需要則執行 bash scripts/refresh-lab-creds.sh）
-  4. 已取得使用者同意（成本告知 ≤ $2 量級）
+This script hits real Bedrock (embed + judge); before running it "must" inform the user of the estimated cost and obtain consent
+(safety.md §1: disclose cost before real Bedrock calls).
+Before running, confirm:
+  1. The app is started with ANALYZER_MOCK_MODE=false (localhost:8000 healthy)
+  2. OpenSearch is online (localhost:9200 reachable)
+  3. AWS lab credentials are valid (run bash scripts/refresh-lab-creds.sh if needed)
+  4. User consent obtained (cost disclosed, on the order of <= $2)
 
 gate
 ----
-meta.status != approved 時 exit 1，不發任何外部呼叫（load_golden_set 內部強制）。
+When meta.status != approved, exit 1 without making any external calls (enforced inside load_golden_set).
 
-用法
+Usage
 ----
 uv run python scripts/etl/judge_hybrid_search.py [YYYYMMDD]
-YYYYMMDD 省略時使用 DATE_PLACEHOLDER（不依賴 datetime.now()，對齊 verify 慣例）
+When YYYYMMDD is omitted, DATE_PLACEHOLDER is used (does not rely on datetime.now(), aligned with the verify convention)
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ import os
 import sys
 from pathlib import Path
 
-# ---------- 常數 ----------
+# ---------- Constants ----------
 
 APP_BASE_URL = "http://localhost:8000"
 OS_HOST = "http://localhost:9200"
@@ -85,31 +85,31 @@ DATE_PLACEHOLDER = "YYYYMMDD"
 
 BEDROCK_PROFILE = "lab"
 BEDROCK_REGION = "ap-northeast-1"
-# Opus 級 judge（高信度，避免跨輪漂移）；可用 JUDGE_MODEL_ID 環境變數覆寫
+# Opus-tier judge (high confidence, avoids drift across rounds); overridable via the JUDGE_MODEL_ID environment variable
 JUDGE_MODEL_ID = os.environ.get(
     "JUDGE_MODEL_ID", "jp.anthropic.claude-opus-4-5-20251001-v1:0"
 )
 
 SEARCH_K = 10
 
-# 成功標準 (b)：互補保留的 query ID 清單
-# 向量強項（情境式語意）：design §10.3 提及 q11/q13 為代表
+# Success criterion (b): list of query IDs for complementarity preservation
+# Vector-strong (contextual semantics): design §10.3 cites q11/q13 as representatives
 VECTOR_STRONG_QUERIES = {"q11", "q13"}
-# BM25 強項（詞面精準命中）：design §10.3 提及 q04 ThinkPad
+# BM25-strong (exact lexical hits): design §10.3 cites q04 ThinkPad
 BM25_STRONG_QUERIES = {"q04"}
 
-# ---------- importlib 載入 verify_search_os（重用不重寫）----------
-# 以 __file__ 絕對路徑定位，避免 working directory 影響
+# ---------- importlib loading of verify_search_os (reuse, don't rewrite) ----------
+# Located via the absolute path of __file__ to avoid working-directory effects
 
 
 def _load_verify_mod():
-    """以 importlib 安全載入 verify_search_os.py（不觸發 __main__ guard）.
+    """Safely load verify_search_os.py via importlib (without triggering its __main__ guard).
 
-    使用 Path(__file__).parent 計算絕對路徑，讓腳本從任何工作目錄執行都有效。
+    Uses Path(__file__).parent to compute an absolute path, so the script works when run from any working directory.
 
     Returns:
-        verify_search_os module object（含 load_golden_set, embed_query,
-        knn_search, bm25_search, INDEX_NAME 等屬性）。
+        verify_search_os module object (with load_golden_set, embed_query,
+        knn_search, bm25_search, INDEX_NAME and other attributes).
     """
     path = Path(__file__).parent / "verify_search_os.py"
     spec = importlib.util.spec_from_file_location("verify_search_os", path)
@@ -121,14 +121,14 @@ def _load_verify_mod():
 
 
 def _load_judge_mod():
-    """以 importlib 安全載入 judge_search_relevance.py（重用 judge 引擎）.
+    """Safely load judge_search_relevance.py via importlib (reuse the judge engine).
 
-    比照 _load_verify_mod 模式，使用 Path(__file__).parent 計算絕對路徑。
+    Follows the _load_verify_mod pattern, using Path(__file__).parent to compute an absolute path.
 
     Returns:
-        judge_search_relevance module object（含 _strip_html, _build_judge_prompt,
+        judge_search_relevance module object (with _strip_html, _build_judge_prompt,
         _invoke_judge_single, _judge_batch, JudgeKey, JudgeCache,
-        FEATURE_MAX_CHARS, JUDGE_WORKERS, RETRY_MAX 等屬性）。
+        FEATURE_MAX_CHARS, JUDGE_WORKERS, RETRY_MAX and other attributes).
     """
     path = Path(__file__).parent / "judge_search_relevance.py"
     spec = importlib.util.spec_from_file_location("judge_search_relevance", path)
@@ -139,21 +139,21 @@ def _load_judge_mod():
     return mod
 
 
-# ---------- Hybrid 搜尋：打運行中的 app /search 端點 ----------
+# ---------- Hybrid search: hit the running app's /search endpoint ----------
 
 
 def _fetch_hybrid_results(query_text: str, size: int = SEARCH_K) -> list[str]:
-    """打運行中的 app GET /search，取 hybrid top-{size} mart_id 清單.
+    """Hit the running app's GET /search and fetch the hybrid top-{size} mart_id list.
 
     Args:
-        query_text: 搜尋查詢字串。
-        size: 取 top-k 筆。
+        query_text: The search query string.
+        size: Number of top-k results to fetch.
 
     Returns:
-        list of mart_id (str)，依 RRF 分降序。
-        連線失敗時拋 requests.exceptions.ConnectionError / httpx.ConnectError。
+        list of mart_id (str), in descending RRF score order.
+        Raises requests.exceptions.ConnectionError / httpx.ConnectError on connection failure.
     """
-    import requests  # noqa: PLC0415  (stdlib / pyproject.toml 依賴)
+    import requests  # noqa: PLC0415  (stdlib / pyproject.toml dependency)
 
     url = f"{APP_BASE_URL}/search"
     resp = requests.get(url, params={"q": query_text, "size": size}, timeout=30)
@@ -162,17 +162,17 @@ def _fetch_hybrid_results(query_text: str, size: int = SEARCH_K) -> list[str]:
     return [item["mart_id"] for item in data.get("results", [])]
 
 
-# ---------- 輔助：由 OpenSearch hit list 建立 martId→source 查找表 ----------
+# ---------- Helper: build a martId→source lookup table from an OpenSearch hit list ----------
 
 
 def _build_source_map(hits: list[dict]) -> dict[str, dict]:
-    """由 OpenSearch hit list 建立 {martId: _source} 查找表.
+    """Build a {martId: _source} lookup table from an OpenSearch hit list.
 
     Args:
-        hits: list of OpenSearch hit dict（含 _id、_source）。
+        hits: list of OpenSearch hit dict (with _id, _source).
 
     Returns:
-        {str(hit["_id"]): hit["_source"]} dict。
+        {str(hit["_id"]): hit["_source"]} dict.
     """
     return {str(h["_id"]): (h.get("_source") or {}) for h in hits}
 
@@ -183,30 +183,30 @@ def _enrich_source_map_with_mget(
     source_map: dict[str, dict],
     all_mart_ids: set[str],
 ) -> None:
-    """mget 補抓 source_map 中缺失 doc 的 _source，in-place 填充。
+    """mget to backfill the _source of docs missing from source_map, filling it in place.
 
-    hybrid top-k 候選可能包含「只在某路深位（rank k+1~）」的 doc，
-    這些 doc 不在 knn_hits/bm25_hits 的 top-k 中，source_map 因此空白。
-    空白商品資訊會讓 judge 看不到 martName/feature → 自動判不相關（artifact）。
+    hybrid top-k candidates may include docs that "only appear deep (rank k+1~) in one path";
+    these docs are not in the top-k of knn_hits/bm25_hits, so source_map is blank for them.
+    Blank product information means the judge sees no martName/feature -> automatically judged irrelevant (an artifact).
 
-    本函式對三路聯集中 source_map 尚未覆蓋的 mart_id 發一次 mget 批次請求，
-    補入 martName/feature/keyword/categoryLevelXName/brand/price 等 judge 需要的欄位。
+    This function issues a single mget batch request for the mart_ids not yet covered in source_map across the union of the three paths,
+    backfilling the fields the judge needs, such as martName/feature/keyword/categoryLevelXName/brand/price.
 
-    冪等設計：
-    - 已有 source 的 mart_id 不重抓（即使部分欄位為空也跳過，避免重複費用）。
-    - mget 回傳中 found=False 的 doc 不寫入（保留原空 dict，不覆蓋）。
+    Idempotent design:
+    - mart_ids that already have a source are not re-fetched (skipped even if some fields are empty, to avoid duplicate cost).
+    - docs returned with found=False are not written (the original empty dict is preserved, not overwritten).
 
     Args:
-        os_client: opensearchpy.OpenSearch 實例（同步）。
-        index_name: OpenSearch 索引名稱（e.g. "products_v1"）。
-        source_map: {mart_id: _source dict}，in-place 填充缺失項目。
-        all_mart_ids: 三路聯集的全部 mart_id set。
+        os_client: opensearchpy.OpenSearch instance (synchronous).
+        index_name: OpenSearch index name (e.g. "products_v1").
+        source_map: {mart_id: _source dict}, missing entries filled in place.
+        all_mart_ids: the full set of mart_ids across the union of the three paths.
     """
-    missing_ids = sorted(all_mart_ids - set(source_map))  # 排序保確定性
+    missing_ids = sorted(all_mart_ids - set(source_map))  # sorted for determinism
     if not missing_ids:
         return
 
-    # mget 批次取 _source（只抓 judge 需要的欄位，減少 payload）
+    # mget batch fetch of _source (only the fields the judge needs, to reduce payload)
     resp = os_client.mget(  # type: ignore[attr-defined]
         index=index_name,
         body={
@@ -238,7 +238,7 @@ def _enrich_source_map_with_mget(
         print(f"    [source mget] 補抓 {found_count} 筆 hybrid-only doc source ✓")
 
 
-# ---------- 輔助：渲染 hit 清單為 Markdown 表格行 ----------
+# ---------- Helper: render a hit list as Markdown table rows ----------
 
 
 def _render_hits_table(
@@ -251,18 +251,18 @@ def _render_hits_table(
     has_score: bool,
     title: str,
 ) -> None:
-    """將 hit 清單渲染為 Markdown 表格，append 進 lines.
+    """Render a hit list as a Markdown table, appending to lines.
 
     Args:
-        lines:       輸出行緩衝（in-place append）。
-        hits:        hit 清單；有 score 時為 list[dict]（_id/_score/_source），
-                     無 score 時（hybrid）為 list[str]（mart_id）。
-        qid:         query id，供查 judge_cache。
-        judge_cache: {(qid, mart_id): {"relevant": bool, "reason": str}}。
-        source_map:  {mart_id: _source dict}，供查 martName。
-        has_score:   True → 表格有 score 欄位（knn/bm25 路徑）；
-                     False → 無 score 欄位（hybrid 路徑）。
-        title:       表格段落標題（不含 ###）。
+        lines:       output line buffer (appended in place).
+        hits:        hit list; list[dict] (_id/_score/_source) when there is a score,
+                     list[str] (mart_id) when there is no score (hybrid).
+        qid:         query id, used to look up judge_cache.
+        judge_cache: {(qid, mart_id): {"relevant": bool, "reason": str}}.
+        source_map:  {mart_id: _source dict}, used to look up martName.
+        has_score:   True -> the table has a score column (knn/bm25 path);
+                     False -> no score column (hybrid path).
+        title:       table section title (without ###).
     """
     lines.append(f"\n### {title}\n")
     if has_score:
@@ -295,26 +295,26 @@ def _render_hits_table(
             lines.append(f"| {i+1:4d} | {mid} | {name} | {rel_mark} {reason} |")
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 
 
 def main() -> None:
-    """Hybrid 搜尋三路比較主流程（hybrid / k-NN-only / BM25-only）.
+    """Main flow for the hybrid search three-way comparison (hybrid / k-NN-only / BM25-only).
 
-    執行前提：
-    1. app 已以 ANALYZER_MOCK_MODE=false 啟動（localhost:8000）
-    2. OpenSearch 在線（localhost:9200）
-    3. AWS lab 憑證有效
-    4. 已取得使用者同意（本腳本打真 Bedrock，成本 < $2 量級）
+    Preconditions:
+    1. The app is started with ANALYZER_MOCK_MODE=false (localhost:8000)
+    2. OpenSearch is online (localhost:9200)
+    3. AWS lab credentials are valid
+    4. User consent obtained (this script hits real Bedrock, cost on the order of < $2)
     """
     from opensearchpy import OpenSearch  # noqa: PLC0415
 
-    # ── 初始化 ──
+    # ── Initialization ──
     date_str = sys.argv[1] if len(sys.argv) > 1 else DATE_PLACEHOLDER
     out_path = OUT_DIR / f"search_eval_hybrid_{date_str}.md"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── 動態載入模組（零網路，importlib only）──
+    # ── Dynamically load modules (zero network, importlib only) ──
     verify_mod = _load_verify_mod()
     load_golden_set = verify_mod.load_golden_set
     embed_query = verify_mod.embed_query
@@ -326,12 +326,12 @@ def main() -> None:
     JudgeCache = judge_mod.JudgeCache  # noqa: N806  (type alias, not a class)
     JudgeKey = judge_mod.JudgeKey  # noqa: N806
 
-    # ── Gate：status check（load_golden_set 內部 exit 1，不發任何外部呼叫）──
+    # ── Gate: status check (load_golden_set exits 1 internally, makes no external calls) ──
     golden = load_golden_set(GOLDEN_SET_PATH)
     queries = golden.get("queries", [])
     print(f"Golden set loaded：{len(queries)} 條查詢")
 
-    # ── OpenSearch client（加 timeout/retry）──
+    # ── OpenSearch client (with timeout/retry) ──
     os_client = OpenSearch(
         hosts=[OS_HOST],
         timeout=60,
@@ -339,10 +339,10 @@ def main() -> None:
         retry_on_timeout=True,
     )
 
-    # ── Phase 1：對每條 query 取三組 top-10，同時建 source_map（只算一次）──
-    # hybrid：打運行中 app /search（mock OFF，app 自行做 embed + RRF）
-    # k-NN-only：直打 OpenSearch（embed_query + knn_search）
-    # BM25-only：直打 OpenSearch（bm25_search，無 embed 費用）
+    # ── Phase 1: for each query fetch three top-10 sets, building source_map at the same time (computed only once) ──
+    # hybrid: hit the running app /search (mock OFF, the app does embed + RRF on its own)
+    # k-NN-only: query OpenSearch directly (embed_query + knn_search)
+    # BM25-only: query OpenSearch directly (bm25_search, no embed cost)
     print("\n[Phase 1] 取三路 top-10（hybrid / knn / bm25）…")
     query_results: list[dict] = []
 
@@ -353,23 +353,23 @@ def main() -> None:
 
         print(f"  [{qid}] query：{query_text!r}")
 
-        # hybrid：打 app /search，取 mart_id list（app 端 embed + RRF，無需本地 embed）
+        # hybrid: hit the app /search, fetch the mart_id list (the app does embed + RRF, no local embed needed)
         print(f"    → hybrid（app /search）…")
         hybrid_mart_ids = _fetch_hybrid_results(query_text, size=SEARCH_K)
 
-        # k-NN-only：本地 embed + 直打 OpenSearch
+        # k-NN-only: local embed + query OpenSearch directly
         print(f"    → k-NN embed…")
         vector = embed_query(query_text)
         knn_hits = knn_search(os_client, vector, k=SEARCH_K)
 
-        # BM25-only：直打 OpenSearch（零 Bedrock）
+        # BM25-only: query OpenSearch directly (zero Bedrock)
         bm25_hits = bm25_search(os_client, query_text, k=SEARCH_K)
 
-        # source_map：三路聯集（hybrid ∪ knn ∪ bm25）皆有完整 _source，Phase 2 與 Phase 3 共用。
-        # 1. 先從兩路 hits 建基礎 map（零額外查詢）
+        # source_map: the union of the three paths (hybrid ∪ knn ∪ bm25) all have complete _source, shared by Phase 2 and Phase 3.
+        # 1. First build a base map from the two paths' hits (zero extra queries)
         source_map = _build_source_map(knn_hits + bm25_hits)
-        # 2. mget 補抓 hybrid-only doc 的 _source（避免 judge 看到空白商品名 → artifact）
-        #    hybrid 候選可能來自候選窗深位（rank 11+），不在 knn/bm25 top-10 中。
+        # 2. mget to backfill the _source of hybrid-only docs (to avoid the judge seeing blank product names -> artifact)
+        #    hybrid candidates may come from deep in the candidate window (rank 11+), not in the knn/bm25 top-10.
         all_mart_ids = (
             set(hybrid_mart_ids)
             | {str(h["_id"]) for h in knn_hits}
@@ -382,16 +382,16 @@ def main() -> None:
                 "qid": qid,
                 "query_text": query_text,
                 "category": category,
-                "hybrid_mart_ids": hybrid_mart_ids,   # list[str]，按 RRF 分降序
-                "knn_hits": knn_hits,                  # list[dict]，含 _id/_score/_source
-                "bm25_hits": bm25_hits,                # list[dict]，含 _id/_score/_source
-                "source_map": source_map,              # 三路聯集 martId→_source（mget 已補全）
+                "hybrid_mart_ids": hybrid_mart_ids,   # list[str], in descending RRF score order
+                "knn_hits": knn_hits,                  # list[dict], with _id/_score/_source
+                "bm25_hits": bm25_hits,                # list[dict], with _id/_score/_source
+                "source_map": source_map,              # union of three paths martId→_source (backfilled via mget)
             }
         )
 
-    # ── Phase 2：收集三路聯集，同一輪同 judge 評相關性（JudgeCache 去重）──
-    # 同一 (query_id, mart_id) 只 judge 一次，避免跨路漂移。
-    # Phase 1 已用 mget 補全 hybrid-only doc 的 _source，確保每筆 judge item 都有完整商品資訊。
+    # ── Phase 2: collect the union of the three paths, judge relevance with the same judge in one round (deduplicated via JudgeCache) ──
+    # Each (query_id, mart_id) is judged only once, to avoid drift across paths.
+    # Phase 1 already backfilled the _source of hybrid-only docs via mget, ensuring every judge item has complete product information.
     print("\n[Phase 2] 收集三路 unique 商品聯集，並發 judge…")
 
     judge_cache: dict = {}
@@ -404,9 +404,9 @@ def main() -> None:
         knn_hits = qr["knn_hits"]
         bm25_hits = qr["bm25_hits"]
         hybrid_mart_ids = qr["hybrid_mart_ids"]
-        source_map = qr["source_map"]  # 重用 Phase 1 已算好的
+        source_map = qr["source_map"]  # reuse what Phase 1 already computed
 
-        # 三路聯集（hybrid + knn + bm25），by martId 去重
+        # union of the three paths (hybrid + knn + bm25), deduplicated by martId
         union_ids: dict[str, None] = {}
         for mid in hybrid_mart_ids:
             union_ids[mid] = None
@@ -431,13 +431,13 @@ def main() -> None:
     judge_mod._judge_batch(judge_items, judge_cache)
     print(f"Judge 完成，快取 {len(judge_cache)} 筆。\n")
 
-    # ── Phase 3：計算每 query 指標（hybrid_rel@10 / knn_rel@10 / bm25_rel@10）──
+    # ── Phase 3: compute per-query metrics (hybrid_rel@10 / knn_rel@10 / bm25_rel@10) ──
     print("[Phase 3] 計算三路指標 & 輸出報告…")
 
     per_query_metrics: list[dict] = []
     lines: list[str] = []
 
-    # 報告標頭
+    # Report header
     lines.append(f"# Search Eval Hybrid — {date_str}\n")
     lines.append(
         f"> 索引：`{index_name}`  \n"
@@ -453,12 +453,12 @@ def main() -> None:
         f"{sorted(BM25_STRONG_QUERIES)} 的 hybrid_rel@10 均 ≥ 1  \n"
     )
 
-    # 全局聚合計數器
+    # Global aggregation counters
     total_hybrid_rel = 0
     total_knn_rel = 0
     total_bm25_rel = 0
 
-    # 互補保留追蹤：{qid: hybrid_rel_count}
+    # Complementarity-preservation tracking: {qid: hybrid_rel_count}
     complement_check: dict[str, int] = {}
 
     for qr in query_results:
@@ -468,30 +468,30 @@ def main() -> None:
         hybrid_mart_ids = qr["hybrid_mart_ids"]
         knn_hits = qr["knn_hits"]
         bm25_hits = qr["bm25_hits"]
-        source_map = qr["source_map"]  # 重用 Phase 1 已算好的，不重算
+        source_map = qr["source_map"]  # reuse what Phase 1 already computed, no recompute
 
-        # hybrid_rel@10：hybrid top-10 中 relevant 數量
+        # hybrid_rel@10: number of relevant items in the hybrid top-10
         hybrid_rel_count = sum(
             1 for mid in hybrid_mart_ids
             if judge_cache.get((qid, mid), {}).get("relevant", False)
         )
-        # knn_rel@10：k-NN top-10 中 relevant 數量
+        # knn_rel@10: number of relevant items in the k-NN top-10
         knn_rel_count = sum(
             1 for h in knn_hits
             if judge_cache.get((qid, str(h["_id"])), {}).get("relevant", False)
         )
-        # bm25_rel@10：BM25 top-10 中 relevant 數量
+        # bm25_rel@10: number of relevant items in the BM25 top-10
         bm25_rel_count = sum(
             1 for h in bm25_hits
             if judge_cache.get((qid, str(h["_id"])), {}).get("relevant", False)
         )
 
-        # 全局累計
+        # Global accumulation
         total_hybrid_rel += hybrid_rel_count
         total_knn_rel += knn_rel_count
         total_bm25_rel += bm25_rel_count
 
-        # 互補保留追蹤
+        # Complementarity-preservation tracking
         if qid in VECTOR_STRONG_QUERIES or qid in BM25_STRONG_QUERIES:
             complement_check[qid] = hybrid_rel_count
 
@@ -506,7 +506,7 @@ def main() -> None:
             }
         )
 
-        # ── 每 query 報告區塊 ──
+        # ── Per-query report block ──
         lines.append(f"\n## {qid}「{query_text}」 ({category})\n")
         lines.append(
             f"> 指標：**hybrid_rel@10={hybrid_rel_count}** | "
@@ -530,7 +530,7 @@ def main() -> None:
             title=f"BM25-only top-{SEARCH_K}（直打 OpenSearch multi_match）",
         )
 
-    # ── 每 query 彙總表 ──
+    # ── Per-query summary table ──
     lines.append("\n---\n")
     lines.append("## 每 Query 指標彙總\n")
     lines.append(
@@ -562,7 +562,7 @@ def main() -> None:
         f"| BM25-only | {total_bm25_rel} |\n"
     )
 
-    # 成功標準 (a)：全局 hybrid ≥ max(knn, bm25)
+    # Success criterion (a): global hybrid >= max(knn, bm25)
     criterion_a_pass = total_hybrid_rel >= max(total_knn_rel, total_bm25_rel)
     lines.append("### 成功標準判定\n")
     lines.append(
@@ -572,7 +572,7 @@ def main() -> None:
         f"> **{'達成 ✅' if criterion_a_pass else '未達 ❌'}**\n"
     )
 
-    # 成功標準 (b)：互補保留——向量強項與 BM25 強項 hybrid 均不歸零
+    # Success criterion (b): complementarity preserved — hybrid does not drop to zero for either vector-strong or BM25-strong queries
     complement_results: list[str] = []
     criterion_b_pass = True
     for qid_check in sorted(VECTOR_STRONG_QUERIES | BM25_STRONG_QUERIES):
@@ -599,7 +599,7 @@ def main() -> None:
         lines.append(f"> {line}  \n")
     lines.append(f"> **{'達成 ✅' if criterion_b_pass else '未達 ❌'}**\n")
 
-    # 整體判定
+    # Overall verdict
     overall_pass = criterion_a_pass and criterion_b_pass
     lines.append(
         f"\n### 整體判定：**{'PASS ✅' if overall_pass else 'FAIL ❌'}**  \n"

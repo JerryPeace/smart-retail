@@ -3,9 +3,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 把 .env.local 注入 os.environ — boto3 / langchain_aws 只認 os.environ,
-# pydantic-settings 只把 .env.local 讀進 Settings 物件不會 export。
-# 必須在 import 任何 boto3/langchain 套件之前執行。
+# Inject .env.local into os.environ — boto3 / langchain_aws only read from os.environ,
+# while pydantic-settings only reads .env.local into the Settings object and does not export it.
+# Must run before importing any boto3/langchain package.
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env.local", override=True)
 
 import logging  # noqa: E402
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
         ),
         "Bedrock LLM client",
     )
-    get_opensearch_client()  # 建 AsyncOpenSearch 物件（lazy connect，不阻塞啟動）
+    get_opensearch_client()  # build the AsyncOpenSearch object (lazy connect, does not block startup)
     _preheat(
         lambda: get_bedrock_embeddings(
             model_id=settings.bedrock_embed_model_id,
@@ -53,18 +53,18 @@ async def lifespan(app: FastAPI):
     )
     yield
     # === Shutdown ===
-    await close_opensearch_client()  # 釋放 aiohttp session，避免 unclosed session warning
+    await close_opensearch_client()  # release the aiohttp session to avoid the unclosed session warning
 
 
 def _preheat(fn: Callable[[], object], label: str) -> None:
-    """Lifespan 預熱：把 cached client 先建起來（best-effort）。
+    """Lifespan preheat: build the cached client up front (best-effort).
 
-    mock 模式跳過（不需外部服務，也避免在沒 AWS 憑證的開發機噴錯）。
-    失敗只 log warning，不擋 app 啟動 —— 真正呼叫時還會再試。
+    Skipped in mock mode (no external services needed, and avoids errors on a dev machine without AWS credentials).
+    On failure it only logs a warning and does not block app startup — the actual call will retry later.
 
     Args:
-        fn:    無引數 callable，呼叫後建立並快取 client。
-        label: 用於 log 訊息的服務名稱字串。
+        fn:    a no-argument callable that, when called, builds and caches the client.
+        label: the service name string used in log messages.
     """
     if settings.analyzer_mock_mode:
         return
@@ -82,9 +82,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# === CORS（本機開發用）===
-# 讓本機靜態搜尋 UI（ui/search.html，可經 file:// 或任意埠開啟）能直接 fetch /search。
-# POC 本機限定：allow_origins=["*"] 僅供開發，正式上線須收斂白名單。
+# === CORS (for local development) ===
+# Lets the local static search UI (ui/search.html, openable via file:// or any port) fetch /search directly.
+# POC local-only: allow_origins=["*"] is for development only; production must narrow this to a whitelist.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,16 +93,16 @@ app.add_middleware(
 )
 
 
-# === 全域 exception handlers (FastAPI 原生,讓 router 不必各自 try/except) ===
+# === Global exception handlers (FastAPI native, so routers don't each need their own try/except) ===
 @app.exception_handler(NotFoundError)
 async def _not_found_handler(request: Request, exc: NotFoundError) -> JSONResponse:
-    # domain「查無資源」→ 404。訊息只含資源/id,安全可回 client。
+    # domain "resource not found" → 404. The message only contains the resource/id, so it's safe to return to the client.
     return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
 @app.exception_handler(Exception)
 async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
-    # 未預期錯誤:完整 traceback 只進 log,client 拿通用訊息 (不洩內部細節)。
+    # Unexpected error: the full traceback only goes to the log, the client gets a generic message (no internal details leaked).
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 

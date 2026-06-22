@@ -1,4 +1,4 @@
-"""PromptVariant — A/B 測試的 prompt 變體 (DB-managed prompt registry)"""
+"""PromptVariant — prompt variants for A/B testing (DB-managed prompt registry)."""
 from datetime import datetime
 
 from recommender.timeutil import utcnow
@@ -12,19 +12,19 @@ class PromptVariant(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
 
     # Identity
-    name: str = Field(index=True)  # 例 "recommendation"
-    version: str  # 例 "v1.0", "v2.0"
-    template: str  # 完整 prompt 文字 (含 {placeholders})
+    name: str = Field(index=True)  # e.g. "recommendation"
+    version: str  # e.g. "v1.0", "v2.0"
+    template: str  # the full prompt text (with {placeholders})
 
-    # A/B 控制
-    is_active: bool = Field(default=False, index=True)  # 同時可有多個 active
-    weight: float = Field(default=1.0)  # 流量分配權重
+    # A/B control
+    is_active: bool = Field(default=False, index=True)  # multiple can be active at once
+    weight: float = Field(default=1.0)  # traffic allocation weight
 
     # Metadata
-    notes: str | None = None  # 「實驗目的」(例: 加入 chain-of-thought 步驟)
+    notes: str | None = None  # "experiment purpose" (e.g.: add a chain-of-thought step)
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
     class Config:
-        # name + version 組合唯一
-        # (Alembic autogenerate 不會自動加 unique constraint,需要手動補 migration)
+        # name + version combination is unique
+        # (Alembic autogenerate won't add the unique constraint automatically; a migration must be added manually)
         pass

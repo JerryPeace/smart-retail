@@ -1,23 +1,23 @@
-"""Phase 2c-1 統計層：對 hybrid−bm25 / hybrid−knn 的 rel@10 margin 做配對 bootstrap CI.
+"""Phase 2c-1 statistics layer: compute a paired bootstrap CI for the rel@10 margin of hybrid−bm25 / hybrid−knn.
 
-目的（design：plan Phase 2c-1 地基）：
-  Phase 2 在 15 條 golden set 上得「hybrid 79 > bm25 76」，差距僅 3 個 doc、樣本小。
-  本腳本在擴充後的 50 條上，用配對 bootstrap 量化「hybrid > bm25」是真訊號還是雜訊：
-  若 95% CI 下界 > 0 → 結論統計顯著；若 CI 跨 0 → 達標宣告需降級為「不劣於」。
+Purpose (design: plan Phase 2c-1 foundation):
+  Phase 2 got "hybrid 79 > bm25 76" on the 15-query golden set — a gap of only 3 docs, on a small sample.
+  This script uses a paired bootstrap on the expanded 50 queries to quantify whether "hybrid > bm25" is real signal or noise:
+  if the 95% CI lower bound > 0 → the conclusion is statistically significant; if the CI crosses 0 → the success claim must be downgraded to "not inferior".
 
-輸入：
-  Step 3 端到端報告 MD（judge_hybrid_search.py 產出），解析其「每 Query 指標彙總」表
-  （| qid | category | hybrid_rel@10 | knn_rel@10 | bm25_rel@10 | … |）。
-  ⚠️ 純後處理，0 Bedrock 呼叫、0 額外成本。
+Input:
+  The Step 3 end-to-end report MD (produced by judge_hybrid_search.py); parse its "per-query metrics summary" table
+  (| qid | category | hybrid_rel@10 | knn_rel@10 | bm25_rel@10 | … |).
+  ⚠️ Pure post-processing, 0 Bedrock calls, 0 additional cost.
 
-方法：
-  配對 bootstrap（resample query index with replacement，hybrid/bm25/knn 取自同一條 query，
-  保留配對結構）。B=10000，numpy 固定 seed 確保可重現。
-  輸出全局 + 分類別（lexical_overlap / non_overlap）的 margin 點估計、95% percentile CI、P(margin>0)。
+Method:
+  Paired bootstrap (resample query index with replacement; hybrid/bm25/knn are taken from the same query,
+  preserving the paired structure). B=10000, with a fixed numpy seed for reproducibility.
+  Outputs the margin point estimate, 95% percentile CI, and P(margin>0), both globally and per category (lexical_overlap / non_overlap).
 
-用法：
-  uv run python scripts/etl/bootstrap_hybrid_margin.py [報告路徑]
-  （預設讀 out/search_eval_hybrid_50q_20260613.md）
+Usage:
+  uv run python scripts/etl/bootstrap_hybrid_margin.py [report path]
+  (defaults to reading out/search_eval_hybrid_50q_20260613.md)
 """
 from __future__ import annotations
 
@@ -33,17 +33,17 @@ B = 10_000
 SEED = 20260613
 CI_LOW, CI_HIGH = 2.5, 97.5
 
-# 解析彙總表列：| q07 | non_overlap | 8 | 5 | 6 | … |
+# parse summary-table rows: | q07 | non_overlap | 8 | 5 | 6 | … |
 ROW_RE = re.compile(
     r"^\|\s*(q\d+)\s*\|\s*(lexical_overlap|non_overlap)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|"
 )
 
 
 def parse_report(path: Path) -> list[dict]:
-    """從報告 MD 解析每 query 的 rel@10。
+    """Parse each query's rel@10 from the report MD.
 
     Returns:
-        [{"qid", "category", "hybrid", "knn", "bm25"}, …]，依報告順序。
+        [{"qid", "category", "hybrid", "knn", "bm25"}, …], in report order.
     """
     rows: list[dict] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -64,19 +64,19 @@ def parse_report(path: Path) -> list[dict]:
 def bootstrap_margin(
     a: np.ndarray, b: np.ndarray, rng: np.random.Generator
 ) -> dict:
-    """配對 bootstrap：margin = sum(a) − sum(b)，resample query index。
+    """Paired bootstrap: margin = sum(a) − sum(b), resampling the query index.
 
     Args:
-        a, b: 等長 per-query rel@10 陣列（同序，配對）。
-        rng:  固定 seed 的 numpy generator。
+        a, b: equal-length per-query rel@10 arrays (same order, paired).
+        rng:  a fixed-seed numpy generator.
 
     Returns:
-        {"point", "ci_low", "ci_high", "p_gt0", "mean_per_q"}。
+        {"point", "ci_low", "ci_high", "p_gt0", "mean_per_q"}.
     """
     n = len(a)
     point = float(a.sum() - b.sum())
-    idx = rng.integers(0, n, size=(B, n))  # B 次重抽樣，每次 n 個 index
-    diffs = (a[idx] - b[idx]).sum(axis=1)  # 每次 bootstrap 的 margin（總和）
+    idx = rng.integers(0, n, size=(B, n))  # B resamples, each with n indexes
+    diffs = (a[idx] - b[idx]).sum(axis=1)  # the margin (total) of each bootstrap
     return {
         "point": point,
         "ci_low": float(np.percentile(diffs, CI_LOW)),
@@ -123,7 +123,7 @@ def main() -> None:
         "> 配對 bootstrap：每次重抽樣 query index，hybrid/bm25/knn 取自同一條 query 保留配對結構。\n",
     ]
 
-    # 全局 + 分類別
+    # global + per category
     buckets: list[tuple[str, list[dict]]] = [
         ("全局", rows),
         ("lexical_overlap", [r for r in rows if r["category"] == "lexical_overlap"]),

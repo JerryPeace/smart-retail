@@ -1,4 +1,4 @@
-"""Pipeline endpoints — 觸發 + 查狀態"""
+"""Pipeline endpoints — trigger + check status."""
 from fastapi import APIRouter, BackgroundTasks
 
 from recommender.deps import PipelineServiceDep
@@ -13,7 +13,7 @@ async def run_pipeline(
     background: BackgroundTasks,
     service: PipelineServiceDep,
 ):
-    """觸發 pipeline,立刻 return job_id;實際工作在 BackgroundTask 跑"""
+    """Trigger the pipeline and return job_id immediately; the actual work runs in a BackgroundTask."""
     job = await service.create_job(
         customer_id=body.customer_id, brand=body.brand, month=body.month
     )

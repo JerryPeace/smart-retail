@@ -20,12 +20,12 @@ SessionLocal = async_sessionmaker(
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    """FastAPI dependency: yield 一次 request 用的 session"""
+    """FastAPI dependency: yield a session for one request."""
     async with SessionLocal() as session:
         yield session
 
 
 async def init_db() -> None:
-    """應用啟動時呼叫(目前 Alembic 處理 migration,這裡保留 hook)"""
-    # 之後可以加 connection check 或其他啟動驗證
+    """Called at application startup (Alembic currently handles migrations; this keeps a hook)."""
+    # Could later add a connection check or other startup validation
     pass

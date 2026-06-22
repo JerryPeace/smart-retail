@@ -1,7 +1,7 @@
-"""search 領域 DTO — router 回給 client 的「白名單」欄位。
+"""search domain DTOs — the "allowlist" fields the router returns to the client.
 
-職責：定義 SearchResultItem 與 SearchResponse 兩個 Pydantic schema。
-不放 OpenSearch raw hit 結構（那是 repository 的內部事）。
+Responsibility: define the two Pydantic schemas SearchResultItem and SearchResponse.
+Does not hold the OpenSearch raw hit structure (that's the repository's internal concern).
 """
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from pydantic import BaseModel, ConfigDict
 
 
 class SearchResultItem(BaseModel):
-    """單筆商品搜尋結果。
+    """A single product search result.
 
-    score 為 RRF 融合分（不是 OpenSearch _score；兩路 _score 量綱不同不可比）。
-    brand / price / category 為可選欄位（索引中可能缺漏）。
+    score is the RRF fusion score (not the OpenSearch _score; the two paths' _score have different scales and aren't comparable).
+    brand / price / category are optional fields (may be missing from the index).
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -26,16 +26,16 @@ class SearchResultItem(BaseModel):
 
 
 class SearchResponse(BaseModel):
-    """搜尋端點回傳結構。
+    """The search endpoint's return structure.
 
-    query: 原始查詢字串（原樣帶回，方便 client 對照）。
-    results: 依 RRF 融合分降序排列的商品清單；查無結果回空 list（HTTP 200）。
+    query: the original query string (returned as-is, for the client's convenience in cross-referencing).
+    results: the product list sorted by RRF fusion score descending; no results returns an empty list (HTTP 200).
     """
 
     query: str
     results: list[SearchResultItem]
-    # 路由觀察欄位（auto_route 或 manual 覆寫時填）：
-    # applied_bm25_weight = 本次融合實際用的 BM25 權重；route_label = 判型結果或 "manual"。
-    # 預設 None（auto_route 關且無手動覆寫時不填，向後相容）。
+    # Routing observation fields (filled on auto_route or manual override):
+    # applied_bm25_weight = the BM25 weight actually used in this fusion; route_label = the routing result or "manual".
+    # Default None (not filled when auto_route is off and there's no manual override, backward compatible).
     applied_bm25_weight: float | None = None
     route_label: str | None = None

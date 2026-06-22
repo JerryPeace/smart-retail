@@ -1,19 +1,19 @@
-"""PromoForecastService — 月度專戶促銷預測 (R8 升級版).
+"""PromoForecastService — monthly key-account promo forecast (R8 upgraded version).
 
-POC 範圍:
-  - Scope: 33 家專戶業務課活躍經銷商
-  - R8 cross-category opportunity: 法定可賣 (經濟部) + 上月該品類 0 採購 + 戰略對齊
-  - 不打 LLM (dry_run mode), 純 deterministic ETL + reasoning chain
+POC scope:
+  - Scope: the 33 active dealers of the key-account sales team
+  - R8 cross-category opportunity: legally sellable (Ministry of Economic Affairs) + 0 purchases in that category last month + strategic alignment
+  - No LLM calls (dry_run mode), pure deterministic ETL + reasoning chain
 
-設計原則 (對齊 docs/plans/promo-forecast-data-fitness.md):
-  - 不走 ML — deterministic rules + LLM narrative
-  - Negative constraints: 排除二手機 (反向業務), 平板 (wind down)
-  - Reasoning chain 為 hard requirement (signal/logic/assumption/confidence/expected/risk)
+Design principles (aligned with docs/plans/promo-forecast-data-fitness.md):
+  - No ML — deterministic rules + LLM narrative
+  - Negative constraints: exclude used phones (reverse business), tablets (wind down)
+  - The reasoning chain is a hard requirement (signal/logic/assumption/confidence/expected/risk)
 
-資料來源:
-  - 月度 fact: 新檔 `104e 客戶別.xlsx` > `{N}月` sheet
-  - HubSpot 統編 cache: 外部 JSON data/zhuanhu_tax_ids.json (已 gitignore,含 PII;production 應接 HubSpotService)
-  - 所營事業: 經濟部公示 (透過 g0v 公司寶 API)
+Data sources:
+  - Monthly fact: the new file `104e 客戶別.xlsx` > `{N}月` sheet
+  - HubSpot tax-id cache: external JSON data/zhuanhu_tax_ids.json (gitignored, contains PII; production should connect to HubSpotService)
+  - Registered business scope: Ministry of Economic Affairs public records (via the g0v Company Bao API)
 """
 
 from __future__ import annotations
@@ -37,33 +37,33 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 模組常數
+# Module constants
 # ============================================================================
 
-# 5 個可推薦品類 (排除二手機 / 平板 wind down)
+# The 5 recommendable categories (excludes used phones / tablets being wound down)
 PROMO_CATEGORIES = ["通訊", "資訊", "家電", "配件", "保健"]
 
-# 行業別代碼 → 本公司 品類 mapping v1 (24 條)
-# 擴充清單待 PO 拍板, 見 docs/plans/promo-forecast-moea-business-scope.md §3.2
+# Industry code → company category mapping v1 (24 entries)
+# Expansion list pending PO sign-off, see docs/plans/promo-forecast-moea-business-scope.md §3.2
 INDUSTRY_CODE_MAP: dict[str, str] = {
-    # 通訊群
+    # Communications group
     "F213060": "通訊", "F113070": "通訊", "IE01010": "通訊",
     "CC01060": "通訊", "CC01070": "通訊",
-    # 資訊群
+    # IT group
     "F213030": "資訊", "F113050": "資訊", "F118010": "資訊",
     "F119010": "資訊", "I301010": "資訊", "I301030": "資訊",
     "E605010": "資訊",
-    # 家電群
+    # Home appliance group
     "F213010": "家電", "F113020": "家電", "E601020": "家電",
-    # 配件群
+    # Accessories group
     "F209060": "配件", "F109070": "配件", "F206020": "配件",
     "F116010": "配件",
-    # 保健群 (戰略品類)
+    # Health group (strategic category)
     "F102170": "保健", "F203010": "保健", "F108031": "保健",
     "F208031": "保健", "F208040": "保健", "F208050": "保健",
 }
 
-# 戰略 push priority (對應 promo-forecast-moea-business-scope.md §4)
+# Strategic push priority (corresponds to promo-forecast-moea-business-scope.md §4)
 STRATEGY_PUSH: dict[str, dict] = {
     "保健": {
         "priority": "P1",
@@ -82,19 +82,21 @@ STRATEGY_PUSH: dict[str, dict] = {
     },
 }
 
-# 33 家專戶業務課活躍經銷商 統編 (HubSpot 2026-05-13 snapshot)
-# Production: 應從 HubSpot client 動態查 s_cust_bt_taxidnumber
-# 專戶經銷商 客代 → 統編 對照 (PII)。內容存外部 JSON,已 gitignore,不進公開 repo。
-# 結構範例見 data/zhuanhu_tax_ids.example.json;production 應改接 HubSpotService。
+# Tax IDs of the 33 active dealers of the key-account sales team (HubSpot 2026-05-13 snapshot)
+# Production: should query s_cust_bt_taxidnumber dynamically from the HubSpot client
+# Key-account dealer code → tax-id mapping (PII). The contents live in an external JSON,
+# gitignored, and do not go into the public repo.
+# See data/zhuanhu_tax_ids.example.json for the structure; production should switch to HubSpotService.
 _TAX_IDS_PATH = Path(__file__).resolve().parents[3] / "data" / "zhuanhu_tax_ids.json"
 
 
 @cache
 def load_zhuanhu_tax_ids() -> dict[str, str]:
-    """載入 客代→統編 對照表。
+    """Load the dealer-code → tax-id mapping.
 
-    檔案不存在 (如公開 repo clone、尚未放置資料) → 回 {} 並 warn,
-    使跨品類預測得出空結果而非 crash (對齊 MOEA「查無視為無資料」的降級策略)。
+    If the file doesn't exist (e.g. a public repo clone, or data not yet placed) → return {}
+    and warn, so cross-category forecasting yields an empty result rather than crashing
+    (aligned with the MOEA fallback strategy of "not found is treated as no data").
     """
     if not _TAX_IDS_PATH.exists():
         logger.warning(
@@ -105,8 +107,8 @@ def load_zhuanhu_tax_ids() -> dict[str, str]:
         return {}
     return json.loads(_TAX_IDS_PATH.read_text(encoding="utf-8"))
 
-# 月度 sheet 結構 (對齊新檔 104e 客戶別 4-11月 sheet)
-SHEET_BUSINESS_GROUP_COL = 0  # 「專戶業務課」
+# Monthly sheet structure (aligned with the new file 104e 客戶別 sheets for months 4-11)
+SHEET_BUSINESS_GROUP_COL = 0  # "key-account sales team"
 SHEET_DEALER_ID_COL = 1
 SHEET_DEALER_NAME_COL = 2
 SHEET_SALES_REP_COL = 4
@@ -118,14 +120,14 @@ SHEET_CATEGORY_COLS = {
 SHEET_TOTAL_AP_COL = 14
 ZHUANHU_GROUP_NAME = "專戶業務課"
 
-# 經濟部 API (g0v 公司寶 wrapper, 後端串經濟部商工登記公示資料)
+# Ministry of Economic Affairs API (g0v Company Bao wrapper, backed by the MOEA business-registration public records)
 MOEA_API_BASE = "https://company.g0v.ronny.tw/api/show"
 MOEA_REQUEST_TIMEOUT = 15
 MOEA_RATE_LIMIT_DELAY = 0.3
 
 
 # ============================================================================
-# Pydantic Schemas (內嵌, 對齊 SalesAnalysisService inline 風格)
+# Pydantic Schemas (inlined, matching the SalesAnalysisService inline style)
 # ============================================================================
 
 class ReasoningChain(BaseModel):
@@ -159,13 +161,13 @@ class CrossCategoryOpportunity(BaseModel):
 
 
 class PromoForecastService:
-    """月度專戶促銷預測 (R8 cross-category opportunity, POC v1)."""
+    """Monthly key-account promo forecast (R8 cross-category opportunity, POC v1)."""
 
     def __init__(self, s3: S3Service | None = None) -> None:
         self.s3 = s3
 
     # ====================================================================
-    # 對外介面
+    # Public interface
     # ====================================================================
 
     async def run_from_dataframe(
@@ -173,11 +175,11 @@ class PromoForecastService:
         month: str,
         df_monthly: pd.DataFrame,
     ) -> dict:
-        """從已 load 的 DataFrame 跑一輪 (POC dry-run friendly).
+        """Run one pass from an already-loaded DataFrame (POC dry-run friendly).
 
         Args:
             month: "YYYY-MM" e.g. "2026-04"
-            df_monthly: 月度 sheet 完整 DataFrame (包含 header rows)
+            df_monthly: the full monthly sheet DataFrame (including header rows)
         """
         df_zhuanhu = self._filter_zhuanhu_dealers(df_monthly)
         moea_data = await self._batch_query_moea(list(load_zhuanhu_tax_ids().values()))
@@ -186,7 +188,7 @@ class PromoForecastService:
         return self._build_summary(month, df_zhuanhu, opps_sorted)
 
     async def run_from_local_xlsx(self, month: str, xlsx_path: Path) -> dict:
-        """POC: 從 local xlsx 跑 (不需要 S3 / HubSpot client)."""
+        """POC: run from a local xlsx (no S3 / HubSpot client needed)."""
         year, mm = month.split("-")
         sheet_name = f"{int(mm)}月"
         df = await asyncio.to_thread(
@@ -196,12 +198,12 @@ class PromoForecastService:
         return await self.run_from_dataframe(month, df)
 
     # ====================================================================
-    # 內部: ETL
+    # Internal: ETL
     # ====================================================================
 
     @staticmethod
     def _filter_zhuanhu_dealers(df: pd.DataFrame) -> pd.DataFrame:
-        """Filter 專戶業務課 4 月活躍經銷商 (~33 家)."""
+        """Filter the key-account sales team's active dealers for the month (~33)."""
         data = df.iloc[SHEET_DATA_START_ROW:].reset_index(drop=True)
         mask_group = data[SHEET_BUSINESS_GROUP_COL] == ZHUANHU_GROUP_NAME
         zhuanhu = data[mask_group].copy()
@@ -219,7 +221,7 @@ class PromoForecastService:
 
     @staticmethod
     def _classify_legal_categories(scope: list[tuple[str, str]]) -> set[str]:
-        """從所營事業代碼推導法定可賣的 本公司 品類 set."""
+        """Derive the set of company categories that are legally sellable, from the registered business-scope codes."""
         return {
             INDUSTRY_CODE_MAP[code]
             for code, _desc in scope
@@ -231,7 +233,7 @@ class PromoForecastService:
         df: pd.DataFrame,
         moea_data: dict[str, list[tuple[str, str]]],
     ) -> list[CrossCategoryOpportunity]:
-        """R8 升級版: 法定可賣 + 上月 0 採購 + 戰略對齊."""
+        """R8 upgraded version: legally sellable + 0 purchases last month + strategic alignment."""
         opportunities: list[CrossCategoryOpportunity] = []
         for _, row in df.iterrows():
             dealer_id = self._normalize_dealer_id(row[SHEET_DEALER_ID_COL])
@@ -252,11 +254,11 @@ class PromoForecastService:
 
             for target in PROMO_CATEGORIES:
                 if target not in legal:
-                    continue  # 沒法定登記
+                    continue  # no legal registration
                 if actual.get(target, 0) > 0:
-                    continue  # 已採購, 非 cross-sell
+                    continue  # already purchased, not a cross-sell
                 if target not in STRATEGY_PUSH:
-                    continue  # 沒戰略對齊
+                    continue  # no strategic alignment
                 evidence = [
                     MOEAEvidence(code=c, description=d)
                     for c, d in scope
@@ -299,9 +301,9 @@ class PromoForecastService:
         main_cat = max(sales_categories, key=sales_categories.get) if sales_categories else "(無)"
         main_amount = int(sales_categories.get(main_cat, 0))
 
-        # review #5:confidence 依「證據品質」推導,不再一律 HIGH。
-        # 訊號:法定登記是否直接命中該品類 (evidence) + 是否有健康主業承載。
-        # 門檻為啟發式,待 PO 校準 (見 docs/plans/promo-forecast-moea-business-scope.md)。
+        # review #5: confidence is derived from "evidence quality" rather than always being HIGH.
+        # Signals: whether the legal registration directly hits this category (evidence) + whether there's a healthy core business to carry it.
+        # The thresholds are heuristic, pending PO calibration (see docs/plans/promo-forecast-moea-business-scope.md).
         if evidence and sales_categories:
             confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
         elif evidence or sales_categories:
@@ -344,7 +346,7 @@ class PromoForecastService:
         )
 
     # ====================================================================
-    # 內部: 經濟部 API
+    # Internal: Ministry of Economic Affairs API
     # ====================================================================
 
     async def _batch_query_moea(
@@ -360,9 +362,10 @@ class PromoForecastService:
 
     @staticmethod
     def _query_single_moea(tax_id: str) -> list[tuple[str, str]]:
-        # review #5:查不到所營事業時回 [] (下游視為「無法定品類證據」),
-        # 但不能靜默 —— 用 log.warning 留 trace,方便事後分辨「真的沒登記」
-        # vs「API 掛了 / 被 rate limit」。
+        # review #5: when the business scope isn't found, return [] (downstream treats it as
+        # "no legal category evidence"), but it must not be silent — use log.warning to leave a
+        # trace, making it possible to later distinguish "genuinely not registered"
+        # vs "the API went down / was rate-limited".
         try:
             r = requests.get(
                 f"{MOEA_API_BASE}/{tax_id}",
@@ -384,7 +387,7 @@ class PromoForecastService:
             return []
 
     # ====================================================================
-    # 內部: 統計輸出
+    # Internal: statistical output
     # ====================================================================
 
     @staticmethod
@@ -409,7 +412,7 @@ class PromoForecastService:
         }
 
     # ====================================================================
-    # 對外: CSV 輸出 (供未來 S3 寫入)
+    # Public: CSV output (for future S3 writes)
     # ====================================================================
 
     @staticmethod

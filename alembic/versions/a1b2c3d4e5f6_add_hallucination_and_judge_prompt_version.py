@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # hallucination_score: 既有 row 用 0.5 backfill;之後 NOT NULL
+    # hallucination_score: backfill existing rows with 0.5; then NOT NULL
     op.add_column(
         'evaluation',
         sa.Column(
@@ -31,7 +31,7 @@ def upgrade() -> None:
     )
     op.alter_column('evaluation', 'hallucination_score', server_default=None)
 
-    # judge_prompt_version: 既有 row 用 'judge/v1.0' backfill
+    # judge_prompt_version: backfill existing rows with 'judge/v1.0'
     op.add_column(
         'evaluation',
         sa.Column(

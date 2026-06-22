@@ -1,12 +1,12 @@
-"""Prompt template 載入 — 把 prompts/ 下的 .md 編譯成 LangChain ChatPromptTemplate。
+"""Prompt template loading — compiles the .md files under prompts/ into LangChain ChatPromptTemplates.
 
-對齊 CLAUDE.md「prompt 走 versioning,不要 hardcode prompt」:
-  - 模板內容存檔案 (未來可平移到 prompt_variants 表做 A/B),程式只引用 version 字串
-  - 統一在這裡載入,兩個 service 共用,避免各自 read_text + str.format
+Aligns with CLAUDE.md "prompts use versioning, don't hardcode prompts":
+  - Template content lives in files (can later be migrated to the prompt_variants table for A/B); the code only references the version string
+  - Loaded in one place here, shared by both services, to avoid each doing its own read_text + str.format
 
-version 字串格式: "{module}/{version}" → prompts/{module}/{version}.md
-  例: "judge/v1.0"          → prompts/judge/v1.0.md
-      "recommendation/v1.0" → prompts/recommendation/v1.0.md
+version string format: "{module}/{version}" → prompts/{module}/{version}.md
+  e.g.: "judge/v1.0"          → prompts/judge/v1.0.md
+        "recommendation/v1.0" → prompts/recommendation/v1.0.md
 """
 from __future__ import annotations
 
@@ -15,33 +15,33 @@ from pathlib import Path
 
 from langchain_core.prompts import ChatPromptTemplate
 
-# src/recommender/prompts.py → parent=recommender → src → repo root,再進 prompts/
+# src/recommender/prompts.py → parent=recommender → src → repo root, then into prompts/
 PROMPTS_ROOT = Path(__file__).resolve().parent.parent.parent / "prompts"
 
 
 @cache
 def _load_text(version: str) -> str:
-    """讀 .md 原文。lru_cache: 同一 version 只讀一次磁碟。
+    """Read the raw .md text. lru_cache: each version reads from disk only once.
 
-    review #10 注意:快取以 version 字串為 key。改了某個 .md 檔的「內容」但
-    沿用同一 version,正在跑的 process 不會重讀,需重啟才生效。這是刻意的 —
-    prompt 一旦發布就該是 immutable;要改內容請發新 version (例 v1.1) 並更新
-    呼叫端的 *_PROMPT_VERSION 常數,別原地改檔,以免 A/B 測試時新舊混用難追。
+    review #10 note: the cache is keyed by the version string. If you change the *content* of a .md file but
+    keep the same version, a running process will not re-read it; a restart is required to take effect. This is intentional —
+    once published, a prompt should be immutable; to change content, publish a new version (e.g. v1.1) and update
+    the caller's *_PROMPT_VERSION constant, rather than editing the file in place, to avoid mixing old and new in A/B tests in a way that's hard to trace.
     """
     path = PROMPTS_ROOT / f"{version}.md"
     return path.read_text(encoding="utf-8")
 
 
 def load_system_prompt(version: str, human_template: str) -> ChatPromptTemplate:
-    """把 .md 當 system 指令,搭一句 human 觸發,組成 ChatPromptTemplate。
+    """Use the .md as the system instruction, paired with a human trigger line, to form a ChatPromptTemplate.
 
-    為什麼分 system / human:
-      - system = 角色與評分規則 (穩定、可版本控管的 prompt 本體,放 .md)
-      - human  = 本次任務的觸發語 (含 {變數},runtime 注入)
-      Bedrock Converse 需要至少一則 user 訊息,單給 system 會報錯,故必帶 human。
+    Why split system / human:
+      - system = role and scoring rules (the stable, version-controlled body of the prompt, in .md)
+      - human  = the trigger phrase for this task (contains {variables}, injected at runtime)
+      Bedrock Converse requires at least one user message; providing only system errors out, so a human message is always included.
 
-    .md 內的 {變數} 與 human_template 內的 {變數} 都會成為這個 template 的
-    input_variables —— invoke 時用 dict 一次補齊。
+    The {variables} inside the .md and inside human_template all become this template's
+    input_variables — filled in at once with a dict at invoke time.
     """
     return ChatPromptTemplate.from_messages([
         ("system", _load_text(version)),

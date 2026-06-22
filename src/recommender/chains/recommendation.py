@@ -1,12 +1,12 @@
-"""Recommendation chain — LCEL Runnable: dict → RecommendationOutput。
+"""Recommendation chain — LCEL Runnable: dict → RecommendationOutput.
 
-LangChain 最佳實踐:把 chain 當「一等公民」抽成獨立 factory,而非埋在 service 裡。
-好處:
-  - 可單獨測試 (傳 FakeListChatModel 進來,不打 Bedrock)
-  - 可組合 (上游接 RunnableLambda、下游掛 .with_retry() / .with_fallbacks())
-  - service 只負責「聚合資料 + 編排 + 寫 DB」,chain 只負責「prompt + 結構化輸出」
+LangChain best practice: treat the chain as a "first-class citizen" extracted into a standalone factory, rather than buried inside the service.
+Benefits:
+  - Can be tested in isolation (pass in a FakeListChatModel, no Bedrock calls)
+  - Composable (attach a RunnableLambda upstream, hang .with_retry() / .with_fallbacks() downstream)
+  - the service only handles "aggregate data + orchestrate + write DB", the chain only handles "prompt + structured output"
 
-chain 不自己建 LLM,改用注入 (build_*_chain(llm)) —— 讓 chain 與「LLM 怎麼來」解耦。
+The chain doesn't build the LLM itself; it's injected (build_*_chain(llm)) — decoupling the chain from "where the LLM comes from".
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from recommender.schemas.recommendation import RecommendationOutput
 
 RECOMMENDATION_PROMPT_VERSION = "recommendation/v1.0"
 
-# human 觸發語 (含 runtime 注入變數);system 規則本體在 prompts/recommendation/v1.0.md
+# human trigger phrase (contains runtime-injected variables); the system rules body is in prompts/recommendation/v1.0.md
 _HUMAN_TEMPLATE = (
     "請為經銷商 {customer_id} 產出本月推薦報告。\n"
     "參考資料路徑: {dataset_s3_key}\n"
@@ -27,10 +27,10 @@ _HUMAN_TEMPLATE = (
 
 
 def build_recommendation_chain(llm: BaseChatModel) -> Runnable:
-    """組推薦 chain。
+    """Assemble the recommendation chain.
 
-    輸入: {"customer_id": str, "dataset_s3_key": str}
-    輸出: RecommendationOutput (Pydantic,with_structured_output 保證)
+    Input:  {"customer_id": str, "dataset_s3_key": str}
+    Output: RecommendationOutput (Pydantic, guaranteed by with_structured_output)
     """
     prompt = load_system_prompt(RECOMMENDATION_PROMPT_VERSION, _HUMAN_TEMPLATE)
     return prompt | llm.with_structured_output(RecommendationOutput)

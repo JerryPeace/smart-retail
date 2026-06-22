@@ -1,29 +1,29 @@
 """
-一次性調查腳本：為什麼 hybrid（naive RRF k=60）輸給 BM25-only？哪種融合策略能贏？
+One-off investigation script: why does hybrid (naive RRF k=60) lose to BM25-only? Which fusion strategy can win?
 
-方法
-----
-1. 解析 out/search_eval_hybrid_20260613.md 的 277 個已判定 (query, doc) label 作為種子快取
-   （reason 含「空白」的 label 是評估 artifact——judge 當時看不到商品資訊——標記失效重判）。
-2. 對 15 條 golden query 取 k-NN top-30 與 BM25 top-30（Titan embed 15 次 + OpenSearch 30 查詢）。
-3. 純 Python 建立所有融合策略的 top-10（ranking 不需要 label）：
-   - RRF k-sweep（k=1/5/10/20/30/60/100, pool=20）
-   - 候選池 sweep（pool=10/20/30 × k=10/60）
-   - weighted RRF（w_bm25 = 0.5~0.9 × k=10/60, pool=20）
-   - score-based fusion（min-max 正規化 raw _score 加權, pool=20）
-   - oracle（per-query 取單路較優者；上界參考）
-4. 收集所有策略 top-10 + 兩條 baseline top-10 的 (query, doc) 聯集，扣掉有效快取，
-   只對新 pair 打 Opus judge（重用 judge_search_relevance 的 _judge_batch 引擎）。
-5. 對照完整 label 表計算各策略全局 rel@10；q05/q08/q11 逐條診斷 gold 在融合後的去向。
+Method
+------
+1. Parse the 277 already-judged (query, doc) labels in out/search_eval_hybrid_20260613.md as a seed cache
+   (a label whose reason contains "空白" is an evaluation artifact -- the judge could not see the product info at the time -- so mark it invalid and re-judge).
+2. For the 15 golden queries, fetch k-NN top-30 and BM25 top-30 (15 Titan embeds + 30 OpenSearch queries).
+3. Build the top-10 for every fusion strategy in pure Python (ranking does not need labels):
+   - RRF k-sweep (k=1/5/10/20/30/60/100, pool=20)
+   - candidate-pool sweep (pool=10/20/30 x k=10/60)
+   - weighted RRF (w_bm25 = 0.5~0.9 x k=10/60, pool=20)
+   - score-based fusion (min-max normalized raw _score, weighted, pool=20)
+   - oracle (per-query, take the better of the two single routes; an upper-bound reference)
+4. Collect the union of (query, doc) across all strategies' top-10 + the two baselines' top-10, subtract the valid cache,
+   and run the Opus judge only on the new pairs (reusing judge_search_relevance's _judge_batch engine).
+5. Compute each strategy's global rel@10 against the full label table; for q05/q08/q11, diagnose case by case where the gold ends up after fusion.
 
-用法
-----
+Usage
+-----
 uv run python scripts/etl/investigate_hybrid_fusion.py
-（冪等：runs 與 judge 結果落地 out/investigate_*.json，重跑不重費）
+(idempotent: runs and judge results are persisted to out/investigate_*.json, so rerunning incurs no extra cost)
 
-安全
-----
-打真 Bedrock（Titan embed 15 次 + Opus judge 僅新 pair），使用者已同意（公司出錢、控制用量）。
+Safety
+------
+Hits real Bedrock (15 Titan embeds + Opus judge on new pairs only); the user has consented (the company pays, usage is controlled).
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Opus judge（與前輪報告同一 judge，避免跨輪漂移）；需在載入 judge 模組前設定
+# Opus judge (same judge as the previous report, to avoid cross-run drift); must be set before loading the judge module
 os.environ.setdefault("JUDGE_MODEL_ID", "jp.anthropic.claude-opus-4-8")
 
 SCRIPT_DIR = Path(__file__).parent
@@ -44,7 +44,7 @@ RUNS_CACHE = Path("out/investigate_runs_20260613.json")
 JUDGE_CACHE_PATH = Path("out/investigate_judge_cache_20260613.json")
 OUT_MD = Path("out/hybrid_fusion_investigation_20260613.md")
 
-POOL_MAX = 30  # 每路抓 top-30
+POOL_MAX = 30  # fetch top-30 per route
 FOCUS_QIDS = ["q05", "q08", "q11"]
 
 
@@ -56,7 +56,7 @@ def _load_mod(name: str):
     return mod
 
 
-# ---------- Step 1：解析既有報告 → 種子 label 快取 ----------
+# ---------- Step 1: parse the existing report -> seed label cache ----------
 
 ROW5_RE = re.compile(r"^\|\s*(\d+) \| (\d+) \| (.*) \| ([\d.]+) \| ([✓✗]) ?(.*?) \|$")
 ROW4_RE = re.compile(r"^\|\s*(\d+) \| (\d+) \| (.*) \| ([✓✗]) ?(.*?) \|$")
@@ -64,11 +64,11 @@ QID_RE = re.compile(r"^## (q\d+)「(.+)」 \((\w+)\)")
 
 
 def parse_report(path: Path):
-    """解析三欄報告 → (labels, report_lists, blank_keys)。
+    """Parse the three-column report -> (labels, report_lists, blank_keys).
 
     labels: {(qid, mid): {"relevant": bool, "reason": str}}
-    report_lists: {qid: {"hybrid": [...], "knn": [...], "bm25": [...]}}（top-10 mid 順序）
-    blank_keys: 「商品資訊空白」artifact 的 key 集合（label 無效需重判）
+    report_lists: {qid: {"hybrid": [...], "knn": [...], "bm25": [...]}} (top-10 mid order)
+    blank_keys: the set of keys for "商品資訊空白" artifacts (invalid labels that need re-judging)
     """
     labels: dict = {}
     report_lists: dict = defaultdict(lambda: {"hybrid": [], "knn": [], "bm25": []})
@@ -117,11 +117,11 @@ def parse_report(path: Path):
     return labels, dict(report_lists), blank_keys
 
 
-# ---------- Step 2：抓 k-NN/BM25 top-30 ----------
+# ---------- Step 2: fetch k-NN/BM25 top-30 ----------
 
 
 def fetch_runs(queries: list[dict], verify_mod) -> dict:
-    """{qid: {"query": str, "knn": [hit_slim...], "bm25": [hit_slim...]}}，落地快取。"""
+    """{qid: {"query": str, "knn": [hit_slim...], "bm25": [hit_slim...]}}, persisted to a cache."""
     if RUNS_CACHE.exists():
         print(f"[runs] 重用快取 {RUNS_CACHE}")
         return json.loads(RUNS_CACHE.read_text(encoding="utf-8"))
@@ -161,7 +161,7 @@ def fetch_runs(queries: list[dict], verify_mod) -> dict:
     return runs
 
 
-# ---------- Step 3：融合策略（純 rank/score 計算，不需 label）----------
+# ---------- Step 3: fusion strategies (pure rank/score computation, no labels needed) ----------
 
 
 def weighted_rrf(knn_ids: list[str], bm25_ids: list[str], k: int,
@@ -206,27 +206,27 @@ def build_strategies(runs: dict) -> dict[str, dict[str, list[str]]]:
         strategies["baseline_knn"][qid] = knn_ids_full[:10]
         strategies["baseline_bm25"][qid] = bm25_ids_full[:10]
 
-        # RRF k-sweep（pool=20，對齊 prod candidate_k=2×size）
+        # RRF k-sweep (pool=20, aligned with prod candidate_k=2xsize)
         for k in (1, 5, 10, 20, 30, 60, 100):
             name = f"rrf_k{k}_pool20"
             strategies[name][qid] = weighted_rrf(
                 knn_ids_full[:20], bm25_ids_full[:20], k, 1.0, 1.0)[:10]
 
-        # 候選池 sweep
+        # candidate-pool sweep
         for pool in (10, 30):
             for k in (10, 60):
                 name = f"rrf_k{k}_pool{pool}"
                 strategies[name][qid] = weighted_rrf(
                     knn_ids_full[:pool], bm25_ids_full[:pool], k, 1.0, 1.0)[:10]
 
-        # weighted RRF（w_bm25 sweep；w_knn=1-w_bm25）
+        # weighted RRF (w_bm25 sweep; w_knn=1-w_bm25)
         for k in (10, 60):
             for wb in (0.3, 0.6, 0.7, 0.8, 0.9):
                 name = f"wrrf_k{k}_b{int(wb*100)}_pool20"
                 strategies[name][qid] = weighted_rrf(
                     knn_ids_full[:20], bm25_ids_full[:20], k, 1.0 - wb, wb)[:10]
 
-        # score-based fusion（min-max raw _score, pool=20）
+        # score-based fusion (min-max raw _score, pool=20)
         for wb in (0.3, 0.5, 0.7):
             name = f"minmax_b{int(wb*100)}_pool20"
             strategies[name][qid] = minmax_fusion(
@@ -235,7 +235,7 @@ def build_strategies(runs: dict) -> dict[str, dict[str, list[str]]]:
     return dict(strategies)
 
 
-# ---------- Step 4：judge 補判（只判新 pair）----------
+# ---------- Step 4: judge backfill (judge only new pairs) ----------
 
 
 def load_persisted_judge() -> dict:
@@ -250,7 +250,7 @@ def save_persisted_judge(cache: dict) -> None:
     JUDGE_CACHE_PATH.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 
 
 def main() -> None:
@@ -261,15 +261,15 @@ def main() -> None:
     golden = verify_mod.load_golden_set(SCRIPT_DIR / "golden_set_product_search.yaml")
     queries = golden["queries"]
 
-    # Step 1：種子 label
+    # Step 1: seed labels
     seed_labels, report_lists, blank_keys = parse_report(REPORT_PATH)
     print(f"[seed] 報告解析：{len(seed_labels)} 個 label，"
           f"其中 {len(blank_keys)} 個為「商品資訊空白」artifact（標記失效重判）")
 
-    # Step 2：top-30 runs
+    # Step 2: top-30 runs
     runs = fetch_runs(queries, verify_mod)
 
-    # 一致性檢查：新抓 top-10 vs 報告 top-10；重現 hybrid（rrf k=60 pool 20）
+    # Consistency check: freshly fetched top-10 vs the report's top-10; reproduce hybrid (rrf k=60 pool 20)
     print("\n[consistency] 新抓結果 vs 報告：")
     mismatch = 0
     for qid in report_lists:
@@ -287,17 +287,17 @@ def main() -> None:
     if mismatch == 0:
         print("  全部 15 條：knn/bm25 top-10 與報告一致，hybrid top-10 純 Python 重現成功")
 
-    # Step 3：策略 ranking
+    # Step 3: strategy ranking
     strategies = build_strategies(runs)
     print(f"\n[strategies] 共 {len(strategies)} 個策略（含 2 條 baseline）")
 
-    # Step 4：收集需要 label 的 (qid, mid) 聯集
+    # Step 4: collect the union of (qid, mid) that need labels
     needed: set = set()
     for per_q in strategies.values():
         for qid, top10 in per_q.items():
             for mid in top10:
                 needed.add((qid, mid))
-    # 診斷需要：focus query 的 prod-config 融合 top-20 全列
+    # Needed for diagnosis: the full top-20 of the focus queries' prod-config fusion
     for qid in FOCUS_QIDS:
         fused20 = weighted_rrf(
             [h["mid"] for h in runs[qid]["knn"][:20]],
@@ -309,10 +309,10 @@ def main() -> None:
     persisted = load_persisted_judge()
     labels: dict = {}
     labels.update(valid_seed)
-    labels.update(persisted)  # 本腳本先前已判的（含 blank 重判）
+    labels.update(persisted)  # previously judged by this script (including blank re-judges)
 
     pending_keys = sorted(needed - set(labels))
-    # source lookup：mid → (martName, feature)（同 query 兩路任一有 source 即可）
+    # source lookup: mid -> (martName, feature) (for the same query, either route having a source is enough)
     src_lookup: dict = {}
     for qid, r in runs.items():
         if qid == "_meta":
@@ -349,7 +349,7 @@ def main() -> None:
         save_persisted_judge(persisted)
         print(f"[judge] 完成 {len(new_cache)} 次 Opus 呼叫，已落地 {JUDGE_CACHE_PATH}")
 
-    # Step 5：計分
+    # Step 5: scoring
     def rel_at_10(qid: str, top10: list[str]) -> int:
         return sum(1 for mid in top10
                    if labels.get((qid, mid), {}).get("relevant", False))
@@ -363,7 +363,7 @@ def main() -> None:
     knn_total = next(t for n, t, _ in rows if n == "baseline_knn")
     bm25_total = next(t for n, t, _ in rows if n == "baseline_bm25")
 
-    # oracle：per-query 取兩條 baseline 較優者（路由上界）
+    # oracle: per-query, take the better of the two baselines (routing upper bound)
     oracle_per_q = {}
     for qid in qids:
         oracle_per_q[qid] = max(
@@ -373,11 +373,11 @@ def main() -> None:
 
     rows.sort(key=lambda r: -r[1])
 
-    # 修正 label 後的 prod hybrid（artifact 量化）
+    # prod hybrid after label correction (quantifies the artifact)
     prod_per_q = {qid: rel_at_10(qid, strategies["rrf_k60_pool20"][qid]) for qid in qids}
     prod_total = sum(prod_per_q.values())
 
-    # ---------- 輸出 ----------
+    # ---------- Output ----------
     out: list[str] = []
     out.append("# Hybrid 融合策略調查 — 20260613\n")
     out.append(f"> 種子 label：{len(valid_seed)}（重用報告）+ blank artifact 重判 {len(blank_keys)}；"
@@ -405,7 +405,7 @@ def main() -> None:
         cells = [str(rel_at_10(qid, strategies[s][qid])) for s in key_strats]
         out.append(f"| {qid} | " + " | ".join(cells) + " |")
 
-    # 診斷：focus query 的 prod-config 融合視圖
+    # Diagnosis: the focus queries' prod-config fusion view
     out.append("\n## 病灶診斷（prod 設定 rrf k=60 pool=20 的融合視圖）\n")
     for qid in FOCUS_QIDS:
         knn_ids = [h["mid"] for h in runs[qid]["knn"][:20]]
@@ -425,7 +425,7 @@ def main() -> None:
                 f"| {i} | {mid} | {name_of.get(mid, '')[:22]} "
                 f"| {rank_knn.get(mid, '—')} | {rank_bm25.get(mid, '—')} | {mark} |")
 
-        # gold（兩條 baseline top-10 中 relevant 的 doc）在融合後的去向
+        # where the gold (relevant docs in the two baselines' top-10) ends up after fusion
         golds = [m for m in dict.fromkeys(
             strategies["baseline_knn"][qid] + strategies["baseline_bm25"][qid])
             if labels.get((qid, m), {}).get("relevant")]

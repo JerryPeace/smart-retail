@@ -1,4 +1,4 @@
-"""Alembic env — async + 從 recommender.config 拿 DATABASE_URL"""
+"""Alembic env — async + get DATABASE_URL from recommender.config"""
 import asyncio
 from logging.config import fileConfig
 
@@ -8,7 +8,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlmodel import SQLModel
 
-# 確保 recommender 的 models 都被載入(讓 SQLModel.metadata 認得所有表)
+# Ensure all of recommender's models are loaded (so SQLModel.metadata knows about every table)
 from recommender import models  # noqa: F401
 from recommender.config import settings
 
@@ -22,7 +22,7 @@ target_metadata = SQLModel.metadata
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode (產生 SQL 但不連 DB)"""
+    """Run migrations in 'offline' mode (generate SQL without connecting to the DB)"""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,

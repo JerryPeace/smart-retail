@@ -1,4 +1,4 @@
-"""PromptVariant DB access — 給 AgentService 取 active prompt 用"""
+"""PromptVariant DB access — for AgentService to fetch the active prompt."""
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -10,7 +10,7 @@ class PromptVariantRepository:
         self.session = session
 
     async def list_active(self, name: str) -> list[PromptVariant]:
-        """取出某 name 下所有 is_active=True 的 variants(供 A/B 選擇)"""
+        """Fetch all is_active=True variants under a given name (for A/B selection)."""
         result = await self.session.exec(
             select(PromptVariant)
             .where(PromptVariant.name == name)

@@ -1,34 +1,35 @@
-"""search repository — DSL builder（純函式）+ hybrid_msearch I/O。
+"""search repository — DSL builder (pure functions) + hybrid_msearch I/O.
 
-設計取捨（design §6 / §11）：
-- DSL 從 scripts/etl/verify_search_os.py 的 knn_search / bm25_search lift 進來改 async。
-  knn：embedding 欄 + vector/k；BM25：multi_match 打 martName/feature/keyword。
-- 純函式不讀 settings（host/index 由建構子注入，避免 repo 直接依賴全域 settings 反模式）。
-- 純函式與 I/O 分離：單元測試可直接斷言 dict 結構，不需啟動 OpenSearch。
-- SearchRepository 只做 msearch I/O，不做融合、不做 DTO 轉換（那是 service 的職責）。
-- msearch 任一 per-response error → 直接 raise（fail fast）；單邊降級是 Phase 2b。
+Design trade-offs (design §6 / §11):
+- The DSL was lifted from scripts/etl/verify_search_os.py's knn_search / bm25_search and made async.
+  knn: embedding field + vector/k; BM25: multi_match over martName/feature/keyword.
+- Pure functions don't read settings (host/index injected via the constructor, avoiding the anti-pattern
+  of the repo depending directly on global settings).
+- Pure functions are separated from I/O: unit tests can assert on the dict structure directly, without starting OpenSearch.
+- SearchRepository only does msearch I/O, no fusion, no DTO conversion (that's the service's responsibility).
+- Any per-response error in msearch → raise immediately (fail fast); one-sided degradation is Phase 2b.
 """
 from __future__ import annotations
 
 
 class SearchRepository:
-    """OpenSearch I/O — msearch 呼叫。
+    """OpenSearch I/O — msearch calls.
 
-    DSL 建構與 I/O 分離：build_knn_body / build_bm25_body 為 module-level 純函式，
-    此 class 只負責組 body、發 msearch、回 raw hits。
+    DSL construction is separated from I/O: build_knn_body / build_bm25_body are module-level pure functions,
+    and this class is only responsible for assembling the body, issuing the msearch, and returning raw hits.
 
-    設計重點：
-    - os_client 與 index 由 deps.py 注入，repository 不讀 settings（反模式）。
-    - 兩路查詢以單次 msearch 發出（一次 round-trip，server 端並行）。
-    - 任一 per-response error → raise（fail fast，全域 handler 轉 500）。
+    Design highlights:
+    - os_client and index are injected by deps.py; the repository does not read settings (anti-pattern).
+    - The two-path query is issued as a single msearch (one round-trip, parallelized server-side).
+    - Any per-response error → raise (fail fast, the global handler converts it to 500).
     """
 
     def __init__(self, os_client, index: str) -> None:
-        """初始化 SearchRepository。
+        """Initialize SearchRepository.
 
         Args:
-            os_client: AsyncOpenSearch 實例（由 deps.py 注入）。
-            index:     OpenSearch 索引名稱（由 deps.py 傳入 settings.opensearch_index）。
+            os_client: an AsyncOpenSearch instance (injected by deps.py).
+            index:     the OpenSearch index name (passed in by deps.py as settings.opensearch_index).
         """
         self._client = os_client
         self._index = index
@@ -39,21 +40,21 @@ class SearchRepository:
         query_text: str,
         k: int,
     ) -> tuple[list[dict], list[dict]]:
-        """一次 msearch 併發 k-NN 與 BM25，回 (knn_hits, bm25_hits) 兩組 raw hits。
+        """Run k-NN and BM25 concurrently in a single msearch, returning (knn_hits, bm25_hits) as two sets of raw hits.
 
-        body 為「header dict + query dict」交錯清單（NDJSON 語意），
-        opensearch-py 接受 list[dict] 自動序列化。
+        The body is an interleaved list of "header dict + query dict" (NDJSON semantics);
+        opensearch-py accepts a list[dict] and serializes it automatically.
 
         Args:
-            vector:     查詢向量（長度 1536，與索引 embedding 欄維度一致）。
-            query_text: 查詢字串（BM25 用）。
-            k:          每路取 top-k 筆。
+            vector:     the query vector (length 1536, matching the index embedding field dimension).
+            query_text: the query string (used by BM25).
+            k:          take top-k per path.
 
         Returns:
-            (knn_hits, bm25_hits) 各為 OpenSearch hits list（list[dict]）。
+            (knn_hits, bm25_hits), each an OpenSearch hits list (list[dict]).
 
         Raises:
-            Exception: 任一 per-response 含 "error" key 時 fail fast（全域 handler 轉 500）。
+            Exception: fail fast when any per-response contains an "error" key (the global handler converts it to 500).
         """
         body = [
             {"index": self._index},
@@ -64,7 +65,7 @@ class SearchRepository:
         resp = await self._client.msearch(body=body)
         responses = resp["responses"]
 
-        # 任一邊含 error → fail fast（降級是 Phase 2b 韌性功能，本次不做）
+        # Any side containing error → fail fast (degradation is a Phase 2b resilience feature, not done here)
         for i, r in enumerate(responses):
             if "error" in r:
                 raise RuntimeError(
@@ -77,17 +78,17 @@ class SearchRepository:
 
 
 def build_knn_body(vector: list[float], k: int) -> dict:
-    """建立 k-NN 向量搜尋 query body。
+    """Build the k-NN vector search query body.
 
-    對齊 scripts/etl/verify_search_os.py knn_search 的 DSL 結構。
-    knn 欄位名稱為 `embedding`（Phase 1 嵌入時的欄位名，不可更改）。
+    Aligns with the DSL structure of scripts/etl/verify_search_os.py's knn_search.
+    The knn field name is `embedding` (the field name used during Phase 1 embedding, must not change).
 
     Args:
-        vector: 查詢向量（長度必須與索引 embedding 欄維度一致，1536）。
-        k:      取 top-k 筆。
+        vector: the query vector (length must match the index embedding field dimension, 1536).
+        k:      take top-k.
 
     Returns:
-        OpenSearch search body dict。
+        An OpenSearch search body dict.
     """
     return {
         "size": k,
@@ -103,17 +104,17 @@ def build_knn_body(vector: list[float], k: int) -> dict:
 
 
 def build_bm25_body(query_text: str, k: int) -> dict:
-    """建立 BM25 multi_match 搜尋 query body。
+    """Build the BM25 multi_match search query body.
 
-    對齊 scripts/etl/verify_search_os.py bm25_search 的 DSL 結構。
-    搜尋欄位：martName / feature / keyword（Phase 1 索引時的文字欄位）。
+    Aligns with the DSL structure of scripts/etl/verify_search_os.py's bm25_search.
+    Search fields: martName / feature / keyword (the text fields from Phase 1 indexing).
 
     Args:
-        query_text: 查詢字串。
-        k:          取 top-k 筆。
+        query_text: the query string.
+        k:          take top-k.
 
     Returns:
-        OpenSearch search body dict。
+        An OpenSearch search body dict.
     """
     return {
         "size": k,

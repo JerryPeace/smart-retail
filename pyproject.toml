@@ -17,7 +17,7 @@ dependencies = [
     "sqlmodel>=0.0.22",
     "asyncpg>=0.30",
     "alembic>=1.14",
-    "greenlet>=3.0",  # SQLAlchemy async 需要
+    "greenlet>=3.0",  # required by SQLAlchemy async
     # AWS
     "boto3>=1.35",
     "aioboto3>=13.0",

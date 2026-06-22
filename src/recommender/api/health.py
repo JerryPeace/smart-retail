@@ -1,4 +1,4 @@
-"""Health check endpoints — liveness vs readiness"""
+"""Health check endpoints — liveness vs readiness."""
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
 
@@ -9,13 +9,13 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health/live")
 async def liveness():
-    """Process 還活著嗎? — 用於 K8s liveness probe"""
+    """Is the process still alive? — for the K8s liveness probe."""
     return {"status": "alive"}
 
 
 @router.get("/health/ready")
 async def readiness(session: SessionDep):
-    """真的能服務嗎? — 用於 K8s readiness probe"""
+    """Can it actually serve? — for the K8s readiness probe."""
     try:
         await session.exec(text("SELECT 1"))
     except Exception as e:

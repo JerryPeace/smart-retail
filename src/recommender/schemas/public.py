@@ -1,9 +1,9 @@
-"""對外 response schema — router 回給 client 的「白名單」欄位。
+"""Public-facing response schemas — the "whitelist" of fields the router returns to the client.
 
-為什麼 (修 review #9):
-  router 直接吐 ORM 物件 (Recommendation / Evaluation) 會把所有欄位序列化出去,
-  含 hubspot_sync_error、retries、token 計數等內部欄位。改用 response_model 明確
-  列出可公開欄位 —— 多的欄位 FastAPI 會自動濾掉,新增內部欄位也不會意外外洩。
+Why (fixes review #9):
+  A router that returns ORM objects directly (Recommendation / Evaluation) serializes every field,
+  including internal fields like hubspot_sync_error, retries, and token counts. Using response_model to explicitly
+  list the publishable fields — FastAPI automatically filters out the extras, so newly added internal fields won't accidentally leak.
 """
 from datetime import datetime
 
@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class RecommendationPublic(BaseModel):
-    """Recommendation 對外視圖 (隱藏 hubspot sync 內部狀態 / token 計數)。"""
+    """Public view of Recommendation (hides hubspot sync internal status / token counts)."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -27,7 +27,7 @@ class RecommendationPublic(BaseModel):
 
 
 class EvaluationPublic(BaseModel):
-    """Evaluation 對外視圖 (隱藏 judge token 計數)。"""
+    """Public view of Evaluation (hides judge token counts)."""
 
     model_config = ConfigDict(from_attributes=True)
 

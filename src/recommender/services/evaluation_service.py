@@ -1,12 +1,12 @@
-"""EvaluationService — LLM-as-judge 服務
+"""EvaluationService — LLM-as-judge service
 
-職責:
-  1. 載入 recommendation
-  2. 從檔案載入 judge prompt template 並注入內容
-  3. 呼叫 judge LLM (預設 Opus 4.6) 取得結構化評分
-  4. 寫入 evaluation 表
+Responsibilities:
+  1. Load the recommendation
+  2. Load the judge prompt template from file and inject the content
+  3. Call the judge LLM (Opus 4.6 by default) to get a structured score
+  4. Write to the evaluation table
 
-Mock mode (ANALYZER_MOCK_MODE=true) 直接回固定分數,不打 Bedrock。
+In mock mode (ANALYZER_MOCK_MODE=true) it returns fixed scores directly, without calling Bedrock.
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class EvaluationService:
         return EvaluationPublic.model_validate(evaluation)
 
     async def get(self, eval_id: int) -> EvaluationPublic:
-        """查無 → raise NotFoundError"""
+        """Not found → raise NotFoundError"""
         evaluation = await self.eval_repo.get(eval_id)
         if evaluation is None:
             raise NotFoundError(f"Evaluation {eval_id} not found")
@@ -72,15 +72,15 @@ class EvaluationService:
         return [EvaluationPublic.model_validate(e) for e in evaluations]
 
     # ====================================================================
-    # 真實 path: 呼叫 Bedrock judge LLM
+    # Real path: call the Bedrock judge LLM
     # ====================================================================
     async def _call_judge(
         self, customer_id: str, output: RecommendationOutput
     ) -> tuple[EvaluationOutput, int | None, int | None]:
-        # 用 chains/ 層組好的 judge chain (include_raw=True → dict{parsed, raw})
+        # Use the judge chain assembled in the chains/ layer (include_raw=True → dict{parsed, raw})
         chain = build_judge_chain(self._build_llm())
 
-        # 變數已由下游 ETL 聚合好 (products_text 等),這裡只負責注入
+        # The variables are already aggregated by downstream ETL (products_text, etc.); here we only inject them
         result = await chain.ainvoke(self._build_inputs(customer_id, output))
         parsed: EvaluationOutput = result["parsed"]
         raw_msg = result["raw"]
@@ -91,9 +91,9 @@ class EvaluationService:
         return parsed, input_tokens, output_tokens
 
     def _build_llm(self):
-        """取 (process 層級快取的) judge LLM — 見 recommender/llm.py (review #3)。
+        """Get the (process-level cached) judge LLM — see recommender/llm.py (review #3).
 
-        temperature=0.0:judge 要穩定可重現,不要創造性。
+        temperature=0.0: the judge must be stable and reproducible, not creative.
         """
         return get_bedrock_llm(
             model=settings.bedrock_judge_model_id,
@@ -103,11 +103,12 @@ class EvaluationService:
         )
 
     def _build_inputs(self, customer_id: str, output: RecommendationOutput) -> dict:
-        """把 RecommendationOutput 聚合成 prompt template 的注入變數 (純 Python ETL)。
+        """Aggregate RecommendationOutput into the prompt template's injection variables (pure Python ETL).
 
-        products_text 在這裡用演算法拼好,LLM 只收已聚合的字串 —— 對齊
-        「ETL First, LLM Last」:不把 raw 結構丟給 LLM 要它自己整理。
-        回傳的 dict key 對應 judge/v1.0.md 裡的 {變數}。
+        products_text is assembled here algorithmically; the LLM only receives the already-aggregated
+        string — in line with "ETL First, LLM Last": don't hand the raw structure to the LLM and ask
+        it to organize it itself.
+        The returned dict keys correspond to the {variables} in judge/v1.0.md.
         """
         products_text = "\n".join(
             f"- [{p.sku}] {p.product_name} (信心 {p.confidence:.2f})\n  理由: {p.reason}"
@@ -125,7 +126,7 @@ class EvaluationService:
         }
 
     # ====================================================================
-    # Mock path: ANALYZER_MOCK_MODE=true 用
+    # Mock path: used when ANALYZER_MOCK_MODE=true
     # ====================================================================
     def _mock_judge_output(self) -> EvaluationOutput:
         return EvaluationOutput(

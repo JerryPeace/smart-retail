@@ -1,4 +1,4 @@
-"""Evaluation endpoints — LLM-as-judge 評分"""
+"""Evaluation endpoints — LLM-as-judge scoring."""
 from fastapi import APIRouter
 
 from recommender.deps import EvaluationServiceDep
@@ -11,10 +11,10 @@ router = APIRouter(prefix="/evaluations", tags=["evaluations"])
 async def create_evaluation(
     recommendation_id: int, service: EvaluationServiceDep
 ):
-    """對指定 recommendation 跑一次 LLM-as-judge 評分,寫入 evaluation 表並回傳。
+    """Run one LLM-as-judge scoring for the given recommendation, write it to the evaluation table, and return it.
 
-    找不到 recommendation → service 拋 NotFoundError → 全域 handler 回 404;
-    未預期錯誤 → 全域 handler 回 500 (細節只進 log)。router 不再自己 try/except。
+    Recommendation not found → service raises NotFoundError → global handler returns 404;
+    unexpected error → global handler returns 500 (details only go to the log). The router no longer does its own try/except.
     """
     return await service.evaluate(recommendation_id)
 

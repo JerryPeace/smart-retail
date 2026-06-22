@@ -1,8 +1,8 @@
-"""Judge chain — LCEL Runnable: dict → {"parsed": EvaluationOutput, "raw": ...}。
+"""Judge chain — LCEL Runnable: dict → {"parsed": EvaluationOutput, "raw": ...}.
 
-LLM-as-judge 的 chain。include_raw=True 讓輸出帶 raw message,service 從中抽 token usage。
-資料聚合 (products_text 等) 留在 service 的 _build_inputs (ETL First, LLM Last),
-chain 只收已聚合好的 dict。
+The LLM-as-judge chain. include_raw=True makes the output carry the raw message, from which the service extracts token usage.
+Data aggregation (products_text, etc.) stays in the service's _build_inputs (ETL First, LLM Last);
+the chain only receives an already-aggregated dict.
 """
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ _HUMAN_TEMPLATE = "請依上述五個維度為這份推薦評分,輸出 Evaluati
 
 
 def build_judge_chain(llm: BaseChatModel) -> Runnable:
-    """組 judge chain。
+    """Assemble the judge chain.
 
-    輸入: judge/v1.0.md 需要的注入變數 dict (customer_id / products_text / ...)
-    輸出: dict {"parsed": EvaluationOutput, "raw": AIMessage}（include_raw=True）
+    Input:  the dict of injected variables that judge/v1.0.md needs (customer_id / products_text / ...)
+    Output: dict {"parsed": EvaluationOutput, "raw": AIMessage} (include_raw=True)
     """
     prompt = load_system_prompt(JUDGE_PROMPT_VERSION, _HUMAN_TEMPLATE)
     return prompt | llm.with_structured_output(EvaluationOutput, include_raw=True)

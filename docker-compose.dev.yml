@@ -1,11 +1,11 @@
 # ===================================================================
 # Marketing Cleaner POC - Development docker-compose
-# 對齊 intellio.ai conventions:
+# Aligned with intellio.ai conventions:
 # - postgres 17 / redis 7 / localstack 3.8
 # - app-network bridge
 # - .env.local
 # - profiles for optional services
-# Port 全部錯開 intellio.ai,可同時跑兩個專案
+# All ports are offset from intellio.ai, so both projects can run at the same time
 # ===================================================================
 services:
   postgres:
@@ -69,9 +69,9 @@ services:
     volumes:
       - localstack_data:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock
-      # ready.d 機制: LocalStack 啟動完成後自動執行 init script
+      # ready.d mechanism: LocalStack runs the init script automatically after it finishes starting
       - ./scripts/localstack/init-buckets.sh:/etc/localstack/init/ready.d/init-buckets.sh
-      # 把 fixture 資料夾掛進來,init script 可以直接 sync 上 S3
+      # Mount the fixture folders in, so the init script can sync them straight to S3
       - ./products:/fixtures/products:ro
       - ./customers:/fixtures/customers:ro
     networks:
@@ -90,20 +90,20 @@ services:
 
   opensearch:
     build:
-      # inline Dockerfile：只裝 smartcn plugin（無 COPY，故 BuildKit 不傳 context）。
-      # 取代原 docker/opensearch/Dockerfile，少維護一個檔。
+      # inline Dockerfile: installs only the smartcn plugin (no COPY, so BuildKit does not send context).
+      # Replaces the original docker/opensearch/Dockerfile, one fewer file to maintain.
       context: .
       dockerfile_inline: |
         FROM opensearchproject/opensearch:2.19.5
-        # 安裝 smartcn 中文分詞 plugin（版本必須與 OpenSearch 完全一致）
-        # analysis-kuromoji 是日文，不裝
+        # Install the smartcn Chinese word-segmentation plugin (version must match OpenSearch exactly)
+        # analysis-kuromoji is for Japanese, not installed
         RUN /usr/share/opensearch/bin/opensearch-plugin install --batch analysis-smartcn
     image: marketing-poc-opensearch:local
     container_name: marketing-poc-opensearch
     environment:
       - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true        # 僅限本地 POC
-      - DISABLE_INSTALL_DEMO_CONFIG=true    # 僅限本地 POC
+      - DISABLE_SECURITY_PLUGIN=true        # local POC only
+      - DISABLE_INSTALL_DEMO_CONFIG=true    # local POC only
       - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
       - bootstrap.memory_lock=true
     ulimits:
@@ -132,7 +132,7 @@ services:
       - "5601:5601"
     environment:
       - OPENSEARCH_HOSTS=["http://opensearch:9200"]
-      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true  # 僅限本地 POC
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true  # local POC only
     networks:
       - app-network
     depends_on:
@@ -157,7 +157,7 @@ services:
     env_file:
       - .env.local
     environment:
-      # Container 內部 hostname 覆蓋 .env.local 的 localhost
+      # Container-internal hostnames override the localhost in .env.local
       - DATABASE_URL=postgresql+asyncpg://${DATABASE_USERNAME}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - AWS_ENDPOINT_URL_S3=http://localstack:4566

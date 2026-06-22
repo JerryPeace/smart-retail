@@ -1,4 +1,4 @@
-"""Evaluation DB access — LLM-as-judge 評分紀錄的 CRUD"""
+"""Evaluation DB access — CRUD for LLM-as-judge scoring records."""
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 

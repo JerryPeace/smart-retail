@@ -1,4 +1,4 @@
-"""Pipeline — 編排 dataset → agent → save 全流程"""
+"""Pipeline — orchestrates the full dataset → agent → save flow"""
 import logging
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -29,11 +29,12 @@ class PipelineService:
     ) -> None:
         self.dataset = dataset
         self.agent = agent
-        # job_repo / rec_repo 綁 request-scoped session,只給 create_job / get_job
-        # (在 request 生命週期內呼叫) 用。run() 在 BackgroundTask 跑,不能用它們。
+        # job_repo / rec_repo are bound to a request-scoped session, only for use by
+        # create_job / get_job (called within the request lifecycle). run() executes in a
+        # BackgroundTask and must not use them.
         self.job_repo = job_repo
         self.rec_repo = rec_repo
-        # run() 自己開新 session 用的 factory (review #2)
+        # Factory that run() uses to open its own new session (review #2)
         self._session_factory = session_factory
 
     async def create_job(
@@ -45,7 +46,7 @@ class PipelineService:
         return self._to_response(job)
 
     async def get_job(self, job_id: int) -> JobResponse:
-        """查無 → raise NotFoundError"""
+        """Not found → raise NotFoundError"""
         job = await self.job_repo.get(job_id)
         if job is None:
             raise NotFoundError(f"Job {job_id} not found")
@@ -65,14 +66,16 @@ class PipelineService:
         )
 
     async def run(self, job_id: int) -> None:
-        """完整 pipeline,在 BackgroundTask 跑.
+        """The full pipeline, run in a BackgroundTask.
 
-        review #2:BackgroundTask 在 response 送出後才執行,此時 request-scoped
-        session 早已被 async with 關閉。若沿用 self.job_repo (綁舊 session) 會在
-        第一次 await 就 InvalidRequestError。故這裡自己開一個獨立 session,並用它
-        重建 repo,生命週期跟著背景任務走。
+        review #2: a BackgroundTask only runs after the response has been sent, at which
+        point the request-scoped session has long been closed by its async with block.
+        Reusing self.job_repo (bound to the old session) would raise InvalidRequestError on
+        the first await. So here we open an independent session and rebuild the repos with
+        it, giving them a lifecycle tied to the background task.
 
-        失敗時記錄錯誤狀態並 re-raise,讓 BackgroundTask 把例外吞掉前留下 trace。
+        On failure, record the error status and re-raise, leaving a trace before the
+        BackgroundTask swallows the exception.
         """
         async with self._session_factory() as session:
             job_repo = JobRepository(session)
@@ -90,7 +93,7 @@ class PipelineService:
                     brand=job.brand,
                     month=job.month,
                 )
-                # TODO: 把 _report (rows_in/out 等) 寫進 PipelineJob
+                # TODO: write _report (rows_in/out, etc.) into PipelineJob
 
                 # === Step 2: Agent analyze ===
                 await job_repo.update_status(job_id, JobStatus.analyzing)
@@ -108,7 +111,7 @@ class PipelineService:
                     pipeline_job_id=job_id,
                 )
 
-                # === Step 4: Trigger evaluation (異步,不阻塞 pipeline 完成) ===
+                # === Step 4: Trigger evaluation (async, doesn't block pipeline completion) ===
                 # await self.agent.trigger_evaluation(rec.id)
 
                 await job_repo.update_status(
@@ -116,7 +119,7 @@ class PipelineService:
                 )
 
             except Exception:
-                # review #6:完整 traceback 只進 log,DB / client 只存通用訊息,不洩內部細節
+                # review #6: the full traceback goes only to the log; the DB / client store only a generic message, leaking no internal details
                 logger.exception("Pipeline job %s failed", job_id)
                 await job_repo.update_status(
                     job_id,

@@ -1,4 +1,4 @@
-"""Recommendation 的 DB access"""
+"""DB access for Recommendation."""
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -26,7 +26,7 @@ class RecommendationRepository:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
     ) -> Recommendation:
-        """把 Pydantic agent output 直接 dump 進 JSONB,同時抽出 hot columns"""
+        """Dump the Pydantic agent output directly into JSONB, while also extracting hot columns."""
         rec = Recommendation(
             customer_id=customer_id,
             customer_segment=output.customer_segment,

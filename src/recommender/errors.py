@@ -1,12 +1,12 @@
-"""Domain 例外 — service / repository 層拋出,由 main.py 的 exception handler
-統一翻成 HTTP response。
+"""Domain exceptions — raised by the service / repository layer, translated uniformly into
+HTTP responses by main.py's exception handler.
 
-為什麼用 domain 例外而非在 service 裡 raise HTTPException:
-  service 不該知道 HTTP (它可能被 background task / CLI / 測試呼叫,那些沒有 HTTP)。
-  service 拋語意明確的 domain 例外,API 邊界才負責對應到 status code (FastAPI 慣例)。
+Why use domain exceptions instead of raising HTTPException inside the service:
+  The service shouldn't know about HTTP (it may be called by a background task / CLI / test, which have no HTTP).
+  The service raises semantically clear domain exceptions, and the API boundary is responsible for mapping them to status codes (FastAPI convention).
 """
 from __future__ import annotations
 
 
 class NotFoundError(Exception):
-    """查無資源 (recommendation / job / evaluation 等)。→ HTTP 404。"""
+    """Resource not found (recommendation / job / evaluation, etc.). → HTTP 404."""

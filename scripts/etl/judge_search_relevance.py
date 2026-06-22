@@ -1,45 +1,45 @@
 """
-LLM-judge 搜尋相關性評估腳本：以 LLM-as-judge 取代精確 expected_mart_id 命中量尺.
+LLM-judge search relevance evaluation script: replaces the exact expected_mart_id hit scale with LLM-as-judge.
 
-背景
-----
-原「hit@k 精確命中」量尺對「多 SKU 變體 + 通用語意 query」不公正——
-向量搜尋找到語意相關但 expected_mart_ids 未列舉的商品，仍被判為失敗。
-本腳本改以 LLM-judge 評「相關性」，每個（query, 商品）二元判定：
-  relevant: true/false + reason（≤15字）。
-expected_mart_ids 仍保留在輸出中供參考，但不作為唯一標準答案。
+Background
+----------
+The original "hit@k exact match" scale is unfair to "multi-SKU-variant + generic semantic query" cases —
+products that vector search finds as semantically relevant but that are not listed in expected_mart_ids are still judged as failures.
+This script instead uses an LLM-judge to evaluate "relevance", with a binary verdict per (query, product):
+  relevant: true/false + reason (<=15 chars).
+expected_mart_ids is still kept in the output for reference, but is not the sole ground truth.
 
-輸入
-----
-- scripts/etl/golden_set_product_search.yaml（meta.status 必須為 approved）
-- OpenSearch http://localhost:9200 > index "products_v1"（已嵌入 26,014 筆）
-- AWS Bedrock（profile=lab, region=ap-northeast-1）
-  judge 模型：jp.anthropic.claude-haiku-4-5-20251001-v1:0
-  embed 模型：amazon.titan-embed-text-v2:0（重用 verify_search_os.embed_query）
+Inputs
+------
+- scripts/etl/golden_set_product_search.yaml (meta.status must be approved)
+- OpenSearch http://localhost:9200 > index "products_v1" (26,014 docs already embedded)
+- AWS Bedrock (profile=lab, region=ap-northeast-1)
+  judge model: jp.anthropic.claude-haiku-4-5-20251001-v1:0
+  embed model: amazon.titan-embed-text-v2:0 (reuses verify_search_os.embed_query)
 
-輸出
-----
+Output
+------
 out/search_eval_judge_{YYYYMMDD}.md
 
-成功標準（來自 meta.success_threshold_N，預設 3）
+Success criteria (from meta.success_threshold_N, defaults to 3)
 ------------------------------------------------
-non_overlap 8 條中，「向量勝」（vec_rel@10 > bm25_rel@10）的 query 數 ≥ N。
-相同時算平手，不計入向量勝。
+Of the 8 non_overlap queries, the number of "vector wins" (vec_rel@10 > bm25_rel@10) >= N.
+A tie counts as a draw and does not count as a vector win.
 
-judge 呼叫估算
+judge call estimate
 --------------
-15 query × 平均 ~17 unique 商品 ≈ 255 次呼叫（dict 快取，同一對只 judge 一次）
-Haiku：input ~$0.0008/K token，每次呼叫約 ~220 token
-255 × 220 token ≈ 56,100 token ≈ $0.045 — 成本極低
+15 queries × on average ~17 unique products ≈ 255 calls (dict cache, each pair judged only once)
+Haiku: input ~$0.0008/K token, ~220 tokens per call
+255 × 220 tokens ≈ 56,100 tokens ≈ $0.045 — very low cost
 
-安全
+safety
 ----
-本腳本打真 Bedrock（judge + embed），執行前需取得使用者同意（safety.md §1）。
+This script hits real Bedrock (judge + embed); user consent must be obtained before running (safety.md §1).
 
-用法
+Usage
 ----
 uv run python scripts/etl/judge_search_relevance.py [YYYYMMDD]
-YYYYMMDD 省略時使用 DATE_PLACEHOLDER（不依賴 datetime.now()，對齊 verify 慣例）
+When YYYYMMDD is omitted, DATE_PLACEHOLDER is used (does not rely on datetime.now(), aligned with the verify convention)
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-# ---------- 常數 ----------
+# ---------- Constants ----------
 
 OS_HOST = "http://localhost:9200"
 GOLDEN_SET_PATH = Path("scripts/etl/golden_set_product_search.yaml")
@@ -64,28 +64,28 @@ DATE_PLACEHOLDER = "YYYYMMDD"
 
 BEDROCK_PROFILE = "lab"
 BEDROCK_REGION = "ap-northeast-1"
-# 可用 JUDGE_MODEL_ID 環境變數覆寫（如 jp.anthropic.claude-opus-4-8 做高信度重評）
+# Overridable via the JUDGE_MODEL_ID environment variable (e.g. jp.anthropic.claude-opus-4-8 for a high-confidence re-judge)
 JUDGE_MODEL_ID = os.environ.get(
     "JUDGE_MODEL_ID", "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
 )
 
 SEARCH_K = 10
-FEATURE_MAX_CHARS = 200   # judge prompt 中 feature 截斷長度
-JUDGE_WORKERS = 8          # ThreadPoolExecutor 並發 judge 數
-RETRY_MAX = 6              # 指數退避最大重試次數
+FEATURE_MAX_CHARS = 200   # feature truncation length in the judge prompt
+JUDGE_WORKERS = 8          # number of concurrent judge calls in ThreadPoolExecutor
+RETRY_MAX = 6              # max retries for exponential backoff
 
-# ---------- importlib 載入 verify_search_os（重用不重寫）----------
-# 以 __file__ 絕對路徑定位，避免 working directory 影響
+# ---------- importlib loading of verify_search_os (reuse, don't rewrite) ----------
+# Located via the absolute path of __file__ to avoid working-directory effects
 
 
 def _load_verify_mod():
-    """以 importlib 安全載入 verify_search_os.py（不觸發 __main__ guard）.
+    """Safely load verify_search_os.py via importlib (without triggering its __main__ guard).
 
-    使用 Path(__file__).parent 計算絕對路徑，讓腳本從任何工作目錄執行都有效。
+    Uses Path(__file__).parent to compute an absolute path, so the script works when run from any working directory.
 
     Returns:
-        verify_search_os module object（含 load_golden_set, embed_query,
-        knn_search, bm25_search, INDEX_NAME 等屬性）。
+        verify_search_os module object (with load_golden_set, embed_query,
+        knn_search, bm25_search, INDEX_NAME and other attributes).
     """
     path = Path(__file__).parent / "verify_search_os.py"
     spec = importlib.util.spec_from_file_location("verify_search_os", path)
@@ -96,11 +96,11 @@ def _load_verify_mod():
     return mod
 
 
-# ---------- HTML 清理 ----------
+# ---------- HTML cleanup ----------
 
 
 def _strip_html(text: str) -> str:
-    """移除 HTML 標籤並 unescape 實體，回傳純文字."""
+    """Remove HTML tags and unescape entities, returning plain text."""
     if not text:
         return ""
     cleaned = re.sub(r"<[^>]+>", " ", text)
@@ -113,21 +113,21 @@ def _strip_html(text: str) -> str:
 
 
 def _build_judge_prompt(query: str, mart_name: str, feature_snippet: str) -> str:
-    """組建 judge prompt，要求只回傳 JSON {"relevant": bool, "reason": str}.
+    """Build the judge prompt, requiring it to return only JSON {"relevant": bool, "reason": str}.
 
-    設計原則（ai-prompting.md）：
-    - 給「為什麼」讓模型在邊界情境做對判斷（語意相關即可）
-    - 給反面示例防止誤判
-    - 要求 JSON-only 避免包裝文字干擾解析
-    - reason 限 15 字，節省 output token
+    Design principles (ai-prompting.md):
+    - Give the "why" so the model judges correctly in borderline cases (semantic relevance suffices)
+    - Give counter-examples to prevent misjudgment
+    - Require JSON-only to avoid wrapper text interfering with parsing
+    - Limit reason to 15 chars, to save output tokens
 
     Args:
-        query: 使用者搜尋 query。
-        mart_name: 商品名稱（martName）。
-        feature_snippet: 商品 feature 前 200 字（已 strip HTML）。
+        query: The user's search query.
+        mart_name: The product name (martName).
+        feature_snippet: The first 200 chars of the product feature (HTML already stripped).
 
     Returns:
-        完整 prompt 字串。
+        The complete prompt string.
     """
     return f"""你是電商搜尋相關性評審。判斷商品對查詢是否「相關」。
 
@@ -155,21 +155,21 @@ def _invoke_judge_single(
     mart_name: str,
     feature: str,
 ) -> dict[str, Any]:
-    """對單一（query, 商品）呼叫 judge LLM，含指數退避重試.
+    """Call the judge LLM for a single (query, product), with exponential-backoff retries.
 
     Args:
-        session: boto3.Session（per-thread 建立，避免跨 thread 共用）。
-        query: 搜尋 query。
-        mart_name: 商品名稱。
-        feature: 商品 feature 原文（此函式內部做 strip + truncate）。
+        session: boto3.Session (created per-thread, to avoid sharing across threads).
+        query: The search query.
+        mart_name: The product name.
+        feature: The raw product feature text (this function strips + truncates it internally).
 
     Returns:
         {"relevant": bool, "reason": str}
-        解析失敗時回傳 {"relevant": False, "reason": "解析失敗"}。
+        Returns {"relevant": False, "reason": "解析失敗"} on parse failure.
 
     Raises:
-        ExpiredTokenException: 憑證過期，上層統一處理並印 refresh 指引。
-        RuntimeError: 超過最大重試次數後仍失敗。
+        ExpiredTokenException: credentials expired; handled uniformly by the caller, which prints refresh guidance.
+        RuntimeError: still failing after exceeding the max retry count.
     """
     feature_snippet = _strip_html(feature)[:FEATURE_MAX_CHARS]
     prompt_text = _build_judge_prompt(query, mart_name, feature_snippet)
@@ -194,7 +194,7 @@ def _invoke_judge_single(
                 accept="application/json",
             )
             text = json.loads(resp["body"].read())["content"][0]["text"].strip()
-            # 解析 JSON（處理 LLM 可能包 markdown code fence 的情況）
+            # Parse JSON (handling the case where the LLM may wrap it in a markdown code fence)
             m = re.search(r"\{.*\}", text, re.DOTALL)
             if m:
                 parsed = json.loads(m.group())
@@ -208,11 +208,11 @@ def _invoke_judge_single(
             exc_str = str(exc)
             exc_name = type(exc).__name__
 
-            # 憑證過期 → 直接 raise，讓上層統一處理
+            # Credentials expired -> raise directly, let the caller handle it uniformly
             if "ExpiredToken" in exc_name or "ExpiredTokenException" in exc_str:
                 raise
 
-            # Throttling / 5xx → 指數退避
+            # Throttling / 5xx -> exponential backoff
             retryable = (
                 "ThrottlingException" in exc_str
                 or "TooManyRequestsException" in exc_str
@@ -230,13 +230,13 @@ def _invoke_judge_single(
                 last_exc = exc
                 continue
 
-            # 其他 exception → 不重試，回傳失敗結果
+            # Other exceptions -> do not retry, return a failure result
             return {"relevant": False, "reason": f"呼叫異常:{exc_name}"}
 
     raise RuntimeError(f"超過最大重試次數 {RETRY_MAX}") from last_exc
 
 
-# ---------- 並發 judge ----------
+# ---------- Concurrent judge ----------
 
 JudgeKey = tuple[str, str]  # (query_id, martId)
 JudgeCache = dict[JudgeKey, dict[str, Any]]
@@ -246,22 +246,22 @@ def _judge_batch(
     items: list[tuple[JudgeKey, str, str, str]],
     cache: JudgeCache,
 ) -> None:
-    """並發 judge 一批（query_id, martId, query_text, mart_name, feature）.
+    """Concurrently judge a batch of (query_id, martId, query_text, mart_name, feature).
 
-    同一 JudgeKey 只 judge 一次（快取去重）。
-    ExpiredToken 時印 refresh 指引、salvage 已完成結果後 sys.exit(1)。
+    Each JudgeKey is judged only once (cache deduplication).
+    On ExpiredToken, print refresh guidance, salvage completed results, then sys.exit(1).
 
     Args:
-        items: list of (key, query_text, mart_name, feature)。
-        cache: 已完成快取（in-place 更新，key = JudgeKey）。
+        items: list of (key, query_text, mart_name, feature).
+        cache: completed cache (updated in place, key = JudgeKey).
 
     Side-effects:
-        更新 cache in-place。
-        ExpiredToken 時 sys.exit(1)。
+        Updates cache in place.
+        sys.exit(1) on ExpiredToken.
     """
     import boto3  # noqa: PLC0415
 
-    # 過濾已快取的項目（不重複 judge）
+    # Filter out already-cached items (don't re-judge)
     pending = [item for item in items if item[0] not in cache]
     if not pending:
         return
@@ -270,7 +270,7 @@ def _judge_batch(
 
     def _worker(item: tuple[JudgeKey, str, str, str]) -> tuple[JudgeKey, dict]:
         key, query_text, mart_name, feature = item
-        # per-thread session（避免 client 跨 thread 共用）
+        # per-thread session (to avoid sharing the client across threads)
         session = boto3.Session(profile_name=BEDROCK_PROFILE, region_name=BEDROCK_REGION)
         result = _invoke_judge_single(session, query_text, mart_name, feature)
         return key, result
@@ -314,19 +314,19 @@ def _judge_batch(
         sys.exit(1)
 
 
-# ---------- 主流程 ----------
+# ---------- Main flow ----------
 
 
 def main() -> None:
-    """LLM-judge 搜尋相關性評估主流程."""
+    """Main flow for LLM-judge search relevance evaluation."""
     from opensearchpy import OpenSearch  # noqa: PLC0415
 
-    # ── 初始化 ──
+    # ── Initialization ──
     date_str = sys.argv[1] if len(sys.argv) > 1 else DATE_PLACEHOLDER
     out_path = OUT_DIR / f"search_eval_judge_{date_str}.md"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── 動態載入 verify_search_os 重用其函式 ──
+    # ── Dynamically load verify_search_os to reuse its functions ──
     verify_mod = _load_verify_mod()
     load_golden_set = verify_mod.load_golden_set
     embed_query = verify_mod.embed_query
@@ -334,14 +334,14 @@ def main() -> None:
     bm25_search = verify_mod.bm25_search
     index_name = verify_mod.INDEX_NAME
 
-    # ── Gate：status check（load_golden_set 內部 exit 1）──
+    # ── Gate: status check (load_golden_set exits 1 internally) ──
     golden = load_golden_set(GOLDEN_SET_PATH)
     queries = golden.get("queries", [])
     meta = golden.get("meta", {})
     success_n = int(meta.get("success_threshold_N", 3))
     print(f"Golden set loaded：{len(queries)} 條查詢  成功門檻 N={success_n}")
 
-    # ── OpenSearch client（加 timeout/retry）──
+    # ── OpenSearch client (with timeout/retry) ──
     os_client = OpenSearch(
         hosts=[OS_HOST],
         timeout=60,
@@ -349,7 +349,7 @@ def main() -> None:
         retry_on_timeout=True,
     )
 
-    # ── Phase 1：嵌入查詢 & 取 vector/BM25 top-10 ──
+    # ── Phase 1: embed queries & fetch vector/BM25 top-10 ──
     print("\n[Phase 1] 嵌入查詢 & 取 top-10…")
     query_results: list[dict] = []
 
@@ -376,7 +376,7 @@ def main() -> None:
             }
         )
 
-    # ── Phase 2：收集所有需 judge 的（query_id, martId）聯集去重 ──
+    # ── Phase 2: collect the deduplicated union of all (query_id, martId) pairs that need judging ──
     judge_cache: JudgeCache = {}
     judge_items: list[tuple[JudgeKey, str, str, str]] = []
     scheduled: set[JudgeKey] = set()
@@ -384,7 +384,7 @@ def main() -> None:
     for qr in query_results:
         qid = qr["qid"]
         query_text = qr["query_text"]
-        # 聯集（vec + bm25），by martId 去重
+        # union (vec + bm25), deduplicated by martId
         union_hits: dict[str, dict] = {}
         for h in qr["vec_hits"] + qr["bm25_hits"]:
             mid = str(h["_id"])
@@ -406,13 +406,13 @@ def main() -> None:
     _judge_batch(judge_items, judge_cache)
     print(f"Judge 完成，快取 {len(judge_cache)} 筆。\n")
 
-    # ── Phase 3：計算每 query 指標 ──
+    # ── Phase 3: compute per-query metrics ──
     print("[Phase 3] 計算指標 & 輸出報告…")
 
     per_query_metrics: list[dict] = []
     lines: list[str] = []
 
-    # 報告標頭
+    # Report header
     lines.append(f"# Search Eval (LLM-Judge) — {date_str}\n")
     lines.append(
         f"> 索引：`{index_name}`  \n"
@@ -424,7 +424,7 @@ def main() -> None:
         f"> ★ = vec_only_rel（向量找到、BM25 top-10 未出現且被判 relevant）\n"
     )
 
-    # 聚合計數器
+    # Aggregation counters
     non_overlap_count = 0
     non_overlap_vec_rel_sum = 0
     non_overlap_bm25_rel_sum = 0
@@ -444,24 +444,24 @@ def main() -> None:
         vec_ids = {str(h["_id"]) for h in vec_hits}
         bm25_ids = {str(h["_id"]) for h in bm25_hits}
 
-        # vec_rel@10：vector top-10 中 relevant 數量
+        # vec_rel@10: number of relevant items in the vector top-10
         vec_rel_count = sum(
             1 for h in vec_hits
             if judge_cache.get((qid, str(h["_id"])), {}).get("relevant", False)
         )
-        # bm25_rel@10：BM25 top-10 中 relevant 數量
+        # bm25_rel@10: number of relevant items in the BM25 top-10
         bm25_rel_count = sum(
             1 for h in bm25_hits
             if judge_cache.get((qid, str(h["_id"])), {}).get("relevant", False)
         )
-        # vec_only_rel：在 vec top-10 且 relevant、但不在 bm25 top-10
+        # vec_only_rel: in vec top-10 and relevant, but not in bm25 top-10
         vec_only_rel_ids = {
             str(h["_id"])
             for h in vec_hits
             if judge_cache.get((qid, str(h["_id"])), {}).get("relevant", False)
             and str(h["_id"]) not in bm25_ids
         }
-        # bm25_only_rel：在 bm25 top-10 且 relevant、但不在 vec top-10
+        # bm25_only_rel: in bm25 top-10 and relevant, but not in vec top-10
         bm25_only_rel_ids = {
             str(h["_id"])
             for h in bm25_hits
@@ -484,7 +484,7 @@ def main() -> None:
             }
         )
 
-        # 聚合
+        # Aggregate
         if category == "non_overlap":
             non_overlap_count += 1
             non_overlap_vec_rel_sum += vec_rel_count
@@ -496,7 +496,7 @@ def main() -> None:
             lexical_vec_rel_sum += vec_rel_count
             lexical_bm25_rel_sum += bm25_rel_count
 
-        # ── 每 query 報告區塊 ──
+        # ── Per-query report block ──
         lines.append(f"\n## {qid}「{query_text}」 ({category})\n")
         lines.append(f"> rationale: {qr['rationale']}  \n")
         lines.append(f"> expected_mart_ids（僅供參考）: {qr['expected_ids']}\n")
@@ -505,7 +505,7 @@ def main() -> None:
             f"vec_only_rel={vec_only_rel_count} | bm25_only_rel={bm25_only_rel_count}\n"
         )
 
-        # 向量 top-10 表
+        # Vector top-10 table
         lines.append(f"### 向量 top-{SEARCH_K}\n")
         lines.append("| rank | martId | martName（前30字）| score | judge |")
         lines.append("|------|--------|------------------|-------|-------|")
@@ -523,7 +523,7 @@ def main() -> None:
                 f"| {i+1:4d} | {mid} | {name} | {score:.3f} | {rel_mark} {reason}{star} |"
             )
 
-        # BM25 top-10 表
+        # BM25 top-10 table
         lines.append(f"\n### BM25 top-{SEARCH_K}\n")
         lines.append("| rank | martId | martName（前30字）| score | judge |")
         lines.append("|------|--------|------------------|-------|-------|")
@@ -541,7 +541,7 @@ def main() -> None:
                 f"| {i+1:4d} | {mid} | {name} | {score:.3f} | {rel_mark} {reason}{star} |"
             )
 
-        # non_overlap 判定
+        # non_overlap verdict
         if category == "non_overlap":
             if vec_rel_count > bm25_rel_count:
                 verdict = "**向量勝 ✅**"
@@ -553,7 +553,7 @@ def main() -> None:
                 f"\n判定：{verdict}（vec_rel={vec_rel_count} vs bm25_rel={bm25_rel_count}）\n"
             )
 
-    # ── 每 query 彙總表 ──
+    # ── Per-query summary table ──
     lines.append("\n---\n")
     lines.append("## 每 Query 指標彙總\n")
     lines.append(
@@ -597,7 +597,7 @@ def main() -> None:
         f"- 全局 bm25_only_rel 總計：**{total_bm25_only}** 筆（BM25 獨有且 relevant）\n"
     )
 
-    # 成功標準判定
+    # Success criteria verdict
     success = non_overlap_vec_wins >= success_n
     lines.append("### 成功標準判定\n")
     lines.append(

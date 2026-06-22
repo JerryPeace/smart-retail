@@ -1,4 +1,4 @@
-"""SQLModel ORM models — 資料庫表定義"""
+"""SQLModel ORM models — database table definitions."""
 from recommender.models.evaluation import Evaluation
 from recommender.models.job import JobStatus, PipelineJob
 from recommender.models.prompt_variant import PromptVariant

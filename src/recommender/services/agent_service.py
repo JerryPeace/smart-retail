@@ -1,15 +1,15 @@
-"""AgentService — LangChain agent 含三大關鍵能力
+"""AgentService — LangChain agent with three key capabilities
 
-POC 範圍:
-  1. Guardrail           — Bedrock guardrailConfig 配置 (透過環境變數)
-  2. Observability       — LangSmith 自動 tracing (環境變數啟用)
-  3. Evaluation          — 跑完後觸發 LLM-as-judge (stub hook)
+POC scope:
+  1. Guardrail           — Bedrock guardrailConfig setup (via environment variables)
+  2. Observability       — LangSmith automatic tracing (enabled via environment variables)
+  3. Evaluation          — triggers LLM-as-judge after a run (stub hook)
 
-Prompt 來源:prompts/{module}/{version}.md 檔案 (chains/ 層載入),
-不從 DB PromptVariant 讀取 (dormant,未來 A/B 實作時再注入)。
+Prompt source: prompts/{module}/{version}.md files (loaded by the chains/ layer),
+not read from the DB PromptVariant (dormant; to be injected later when A/B is implemented).
 
-Mock mode (ANALYZER_MOCK_MODE=true) 期間,回固定 fixture,讓主鏈先跑通。
-Bedrock 權限下來後切換真實作。
+During mock mode (ANALYZER_MOCK_MODE=true), it returns a fixed fixture so the main chain
+can run end-to-end first. Switch to the real implementation once Bedrock access is granted.
 """
 from recommender.chains.recommendation import build_recommendation_chain
 from recommender.config import settings
@@ -27,24 +27,24 @@ class AgentService:
         self.mock_mode = settings.analyzer_mock_mode
 
     # ====================================================================
-    # 對外介面
+    # Public interface
     # ====================================================================
     async def analyze(
         self,
         customer_id: str,
         dataset_s3_key: str,
     ) -> RecommendationOutput:
-        """跑分析,回 RecommendationOutput。"""
+        """Run the analysis and return a RecommendationOutput."""
         if self.mock_mode:
             return self._mock_response(customer_id)
 
-        # === 真實 path:用 chains/ 層組好的 recommendation chain ===
-        # Prompt 來源:chains/recommendation.py RECOMMENDATION_PROMPT_VERSION → prompts/*.md
+        # === Real path: use the recommendation chain assembled in the chains/ layer ===
+        # Prompt source: chains/recommendation.py RECOMMENDATION_PROMPT_VERSION → prompts/*.md
 
-        # 建 LLM (cached,含 guardrail config + LangSmith auto-trace),注入 chain
+        # Build the LLM (cached, with guardrail config + LangSmith auto-trace) and inject it into the chain
         chain = build_recommendation_chain(self._build_llm())
 
-        # ainvoke 傳 dict,key 對應 chain 內 template 的 {customer_id} / {dataset_s3_key}
+        # ainvoke takes a dict whose keys map to the chain template's {customer_id} / {dataset_s3_key}
         result: RecommendationOutput = await chain.ainvoke(
             {"customer_id": customer_id, "dataset_s3_key": dataset_s3_key}
         )
@@ -54,10 +54,10 @@ class AgentService:
     # 1. Guardrail (Bedrock 內建)
     # ====================================================================
     def _guardrail_config(self) -> dict | None:
-        """產 Bedrock guardrailConfig (放進 ChatBedrockConverse 的 additional_model_request_fields).
+        """Build the Bedrock guardrailConfig (passed into ChatBedrockConverse's additional_model_request_fields).
 
-        settings.bedrock_guardrail_id 未設 → 回 None (guardrail 不啟用)。
-        settings.bedrock_guardrail_version 未設 → fallback "DRAFT"。
+        settings.bedrock_guardrail_id not set → return None (guardrail disabled).
+        settings.bedrock_guardrail_version not set → fall back to "DRAFT".
         """
         if not settings.bedrock_guardrail_id:
             return None
@@ -71,14 +71,15 @@ class AgentService:
     # 2. Build LLM (含 observability)
     # ====================================================================
     def _build_llm(self):
-        """取 (process 層級快取的) ChatBedrockConverse — 見 recommender/llm.py。
+        """Get the (process-level cached) ChatBedrockConverse — see recommender/llm.py.
 
-        認證:boto3 自動讀 AWS_PROFILE / AWS_BEARER_TOKEN_BEDROCK / 標準 key。
-        Observability:LangSmith 透過環境變數自動啟用。
-        Guardrail:透過 additional_model_request_fields 注入 guardrailConfig (若有設定)。
+        Auth: boto3 automatically reads AWS_PROFILE / AWS_BEARER_TOKEN_BEDROCK / standard keys.
+        Observability: LangSmith is enabled automatically via environment variables.
+        Guardrail: guardrailConfig is injected via additional_model_request_fields (if configured).
 
-        快取放 module-level (非 self),因為 service 每 request new 一個,
-        instance cache 形同虛設 (review #3)。dict 不可 hash,故 guardrail 轉 tuple。
+        The cache lives at module level (not on self), because a new service is created per
+        request, making an instance cache useless (review #3). A dict isn't hashable, so the
+        guardrail is converted to a tuple.
         """
         gr = self._guardrail_config()
         guardrail_items = tuple(sorted(gr.items())) if gr else None
@@ -91,19 +92,19 @@ class AgentService:
         )
 
     # ====================================================================
-    # 3. Evaluation hook (LLM-as-judge,異步觸發)
+    # 3. Evaluation hook (LLM-as-judge, triggered asynchronously)
     # ====================================================================
     async def trigger_evaluation(self, recommendation_id: int) -> None:
-        """跑完 analyze 後在 background 觸發 judge 評分.
+        """Trigger judge scoring in the background after analyze completes.
 
-        TODO: 實作:
+        TODO: implement:
             evaluator = EvaluationService(rec_repo, eval_repo)
             await evaluator.evaluate(recommendation_id)
         """
         pass  # POC stub
 
     # ====================================================================
-    # Mock response (POC 第一週用)
+    # Mock response (used in the first week of the POC)
     # ====================================================================
     def _mock_response(self, customer_id: str) -> RecommendationOutput:
         return RecommendationOutput(

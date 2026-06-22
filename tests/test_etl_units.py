@@ -197,7 +197,7 @@ class TestClassifyLegalCategories:
         assert result == set()
 
     def test_duplicate_category_codes(self):
-        # Two different codes both map to 通訊
+        # Two different codes both map to 通訊 (telecom)
         scope = [
             ("F213060", "電信服務"),
             ("F113070", "行動通訊"),
