@@ -25,6 +25,12 @@ from search_engine import router as search  # noqa: E402
 from search_engine.client import close_opensearch_client, get_opensearch_client  # noqa: E402
 from search_engine.embeddings import get_bedrock_embeddings  # noqa: E402
 
+# Apply the configured log level (settings.log_level <- LOG_LEVEL env, default INFO).
+# Without this, LOG_LEVEL had no effect. Set LOG_LEVEL=DEBUG in .env.local to see more.
+logging.basicConfig(
+    level=settings.log_level.upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 

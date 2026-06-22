@@ -125,3 +125,9 @@ etl-april: ## Run the 3 ETL scripts for April (writes to out/, bypasses the API)
 	uv run python scripts/etl/aggregate_monthly.py
 	uv run python scripts/etl/classify_dealers.py
 	uv run python scripts/etl/cross_sell_gaps.py
+
+# ====================================================================
+# Logs
+# ====================================================================
+logs: ## Follow docker logs (all, or one service: make logs S=opensearch)
+	docker compose -f docker-compose.dev.yml --env-file .env.local logs -f --tail=100 $(S)
