@@ -67,3 +67,6 @@ scripts/etl/golden_set_product_search.yaml
 dist/
 build/
 *.egg-info/
+
+# Local-only AWS MFA session helper (account/MFA-device specific, not for public repo)
+scripts/refresh-session-token.sh
