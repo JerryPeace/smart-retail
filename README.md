@@ -299,6 +299,49 @@ open http://localhost:8000/docs
 
 ---
 
+## 🧬 Prompt 版本管理
+
+專案的 prompt 一律走 **versioning,不 hardcode**。有兩條互補路徑:
+
+### 1. In-repo 檔案版本(預設,隨程式碼走的技術 prompt)
+
+prompt 本體存 `prompts/{module}/{version}.md`,由 `recommender.prompts.load_system_prompt()` 編譯成 LangChain `ChatPromptTemplate`。版本 = 檔名 + 呼叫端的 `*_PROMPT_VERSION` 常數;**發布即 immutable**——改內容請發新版(`v1.1`)並更新常數,不要原地改檔(避免 A/B 時新舊混用)。
+
+| prompt | 檔案 | 版本常數 | 用途 |
+|--------|------|----------|------|
+| recommendation | `prompts/recommendation/v1.0.md` | `chains/recommendation.py: RECOMMENDATION_PROMPT_VERSION` | 推薦報告生成 |
+| judge | `prompts/judge/v1.0.md` | `chains/judge.py: JUDGE_PROMPT_VERSION` | LLM-as-judge 評估 |
+
+### 2. LangSmith Prompt Hub(要 UI 調整、A/B、與部署解耦時)
+
+LangSmith tracing 已透過環境變數啟用(見 `agent_service._build_llm`)。Prompt Hub 額外提供集中式版本控管:
+
+```python
+from langsmith import Client
+client = Client()                      # 讀 LANGSMITH_API_KEY(放 .env.local)
+
+# 推一版 = 一個 commit(唯一 hash);預設 private
+client.push_prompt("my-prompt", object=chat_prompt_template)
+
+# 拉取:最新 / 用 tag(prod、dev)/ 用 commit hash 鎖版
+prompt = client.pull_prompt("my-prompt")
+prompt = client.pull_prompt("my-prompt:production")
+prompt = client.pull_prompt("my-prompt:<commit_hash>")
+```
+
+| 面向 | 做法 |
+|------|------|
+| **版本** | 每次 `push_prompt` 自動產生一個 commit;UI 的 **Commits** 分頁可看 diff、回滾、鎖版 |
+| **切換不改 code** | 給穩定版貼 tag(`production` / `dev`),程式用 `pull_prompt("name:production")` 拉,換版只切 tag |
+| **A/B** | `client.evaluate(target, data=..., experiment_prefix="v1")` 各版各跑一次;或 `evaluate((expA, expB), evaluators=[...])` 做 pairwise 對決(需 `langsmith>=0.2.0`)|
+| **權限** | prompt 預設 **private**(只有自己的 workspace 看得到);公開需主動設並綁 workspace 共用 handle |
+
+> **機密原則**:含敏感業務內容的 prompt **不入本 repo**,一律存 LangSmith **private**;只有隨程式碼走的技術 prompt(recommendation / judge)放 `prompts/`。判斷準則:技術可公開、業務打法要藏。`LANGSMITH_API_KEY` 放 `.env.local`(已 gitignore),**絕不 commit**。
+
+長 prompt / 大輸入的結構建議(資料置頂、查詢置尾、`<documents>` 包裝、先引用再作答)見 [Claude 官方 long-context prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)。
+
+---
+
 ## 📚 進一步閱讀
 
 - [`docs/architecture/architecture.md`](./docs/architecture/architecture.md) — 完整架構(三層 + DI + 兩條 pipeline + S3 layout + Bedrock 整合)
