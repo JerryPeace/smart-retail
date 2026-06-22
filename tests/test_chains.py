@@ -84,6 +84,7 @@ _JUDGE_OUTPUT_ARGS = {
 
 _REC_INPUTS = {
     "customer_id": "TEST_DEALER_001",
+    "month": "2026-05",
     "dataset_s3_key": "s3://cleaned-data/marketing-recommandation/TEST_DEALER_001/2026-05.json",
 }
 

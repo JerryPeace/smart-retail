@@ -100,6 +100,7 @@ class PipelineService:
                 agent_output = await self.agent.analyze(
                     customer_id=job.customer_id,
                     dataset_s3_key=cleaned_key,
+                    month=job.month,
                 )
 
                 # === Step 3: Save recommendation ===

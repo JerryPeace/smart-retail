@@ -33,10 +33,14 @@ class AgentService:
         self,
         customer_id: str,
         dataset_s3_key: str,
+        month: str = "",
     ) -> RecommendationOutput:
-        """Run the analysis and return a RecommendationOutput."""
+        """Run the analysis and return a RecommendationOutput.
+
+        month ("YYYY-MM") grounds the seasonal/peak-season reasoning in the prompt.
+        """
         if self.mock_mode:
-            return self._mock_response(customer_id)
+            return self._mock_response(customer_id, month)
 
         # === Real path: use the recommendation chain assembled in the chains/ layer ===
         # Prompt source: chains/recommendation.py RECOMMENDATION_PROMPT_VERSION → prompts/*.md
@@ -44,9 +48,9 @@ class AgentService:
         # Build the LLM (cached, with guardrail config + LangSmith auto-trace) and inject it into the chain
         chain = build_recommendation_chain(self._build_llm())
 
-        # ainvoke takes a dict whose keys map to the chain template's {customer_id} / {dataset_s3_key}
+        # ainvoke takes a dict whose keys map to the chain template's {customer_id} / {month} / {dataset_s3_key}
         result: RecommendationOutput = await chain.ainvoke(
-            {"customer_id": customer_id, "dataset_s3_key": dataset_s3_key}
+            {"customer_id": customer_id, "month": month, "dataset_s3_key": dataset_s3_key}
         )
         return result
 
@@ -106,7 +110,8 @@ class AgentService:
     # ====================================================================
     # Mock response (used in the first week of the POC)
     # ====================================================================
-    def _mock_response(self, customer_id: str) -> RecommendationOutput:
+    def _mock_response(self, customer_id: str, month: str = "") -> RecommendationOutput:
+        season = f"{month} " if month else ""
         return RecommendationOutput(
             customer_segment="high-value",
             recommended_products=[
@@ -114,8 +119,8 @@ class AgentService:
                     sku="P3C001",
                     product_name="iPhone 16 Pro Max 256GB",
                     reason=(
-                        f"客戶 {customer_id} 過去購買多項 Apple 生態產品,"
-                        "對最新 iPhone 有高度興趣"
+                        f"客戶 {customer_id} 過去購買多項 Apple 生態產品,對最新 iPhone 有高度興趣;"
+                        f"{season}適逢通訊換機檔期,建議提前備貨主推"
                     ),
                     confidence=0.91,
                 ),
