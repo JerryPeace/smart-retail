@@ -35,7 +35,8 @@ make dev                          # 一鍵起 docker + DB migration + FastAPI
 ### 同事一鍵 onboarding(從零到能搜)
 
 ```bash
-# 1. clone 後,26k 商品 seed 資料已在 repo 內(products/OpenSearch_Full_*.json,已入庫)
+# 1. clone 後,自行放置 26k 商品 seed 到 products/OpenSearch_Full_*.json
+#    (含商品資料,未隨公開 repo 發佈;路徑見 scripts/etl/load_products_os.py 的 SOURCE_FILE)
 git clone <repo> && cd marketing-recommandation && uv sync
 
 # 2. 刷 AWS lab 憑證(向量化要打 Bedrock Cohere v4,需要憑證)
@@ -227,9 +228,9 @@ make narrative MONTH=2026-04 | head -50
 open http://localhost:8000/docs
 ```
 
-### POC 已內建 4 月資料
+### 4 月資料(需自行放置)
 
-`aws-s3/sales/2026/04/` 已有 sales 4 月 xlsx + manifest,LocalStack 啟動時自動同步進 S3。所以一啟動就可以跑 `make analyze MONTH=2026-04`。
+> 銷售原始資料含商業機密,**未隨公開 repo 發佈**(`aws-s3/` 已 gitignore)。把 sales 4 月 xlsx + manifest 放到 `aws-s3/sales/2026/04/`,LocalStack 啟動時會自動同步進 S3,即可跑 `make analyze MONTH=2026-04`。
 
 未來新月份(5 月)資料來時的處理流程見 [`docs/plans/data-governance.md` §9.7](./docs/plans/data-governance.md)。
 
@@ -262,9 +263,9 @@ open http://localhost:8000/docs
 │       └─ router/service/repository/fusion/embeddings/client/schemas;三層職責見 architecture.md §5.8
 │
 ├── ui/search.html                          純 HTML 搜尋測試 UI(打 localhost:8000/search)
-├── products/OpenSearch_Full_*.json   ⭐ 26k 商品 seed(已入庫;make search-setup 用)
+├── products/OpenSearch_Full_*.json   ⭐ 26k 商品 seed(gitignored,未隨公開 repo;自行放置,make search-setup 用)
 │
-├── aws-s3/                                 ⭐ S3 source of truth(local mirror)
+├── aws-s3/                                 ⭐ S3 source of truth(local mirror,gitignored 未隨公開 repo)
 │   ├── products/{category}/{YYYY}/{MM}/products.csv
 │   ├── customers/customers.csv
 │   └── sales/{YYYY}/{MM}/             月度銷售檔(原檔不 rename + manifest)
