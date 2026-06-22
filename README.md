@@ -1,178 +1,178 @@
 # Marketing Cleaner POC
 
-本公司 月度銷售資料 → ETL 彙整 → Bedrock LLM 市場分析 → 產出給業務主管的決策 brief。
+Monthly sales data → ETL aggregation → Bedrock LLM market analysis → a decision brief for sales managers.
 
-> 完整架構說明見 [`docs/architecture/architecture.md`](./docs/architecture/architecture.md)
+> Full architecture: [`docs/architecture/architecture.md`](./docs/architecture/architecture.md)
 
 ---
 
-## 🚀 Quick Start (一鍵啟動)
+## 🚀 Quick Start
 
 ```bash
-# 第一次跑(setup):
-cp .env.example .env.local       # 環境變數
-uv sync                           # 安裝 Python 依賴(含 recommender + search_engine 兩個套件)
-open -a OrbStack                  # 或啟動 Docker Desktop
+# First time (setup):
+cp .env.example .env.local       # environment variables
+uv sync                           # install Python deps (recommender + search_engine packages)
+open -a OrbStack                  # or start Docker Desktop
 
-# 之後每次:
-make dev                          # 一鍵起 docker + DB migration + FastAPI
+# Every time after:
+make dev                          # one command: docker + DB migration + FastAPI
 ```
 
-`make dev` 會依序:
-1. 起 **5 個 docker 容器**(postgres / redis / localstack / adminer / **opensearch**)
-2. 等 postgres + opensearch healthy
-3. 跑 `alembic upgrade head`(DB schema 升級)
-4. 起 FastAPI uvicorn(foreground,Ctrl-C 停;啟動前會自清殘留 uvicorn,避免 Errno 48)
+`make dev` runs, in order:
+1. Starts **5 docker containers** (postgres / redis / localstack / adminer / **opensearch**)
+2. Waits for postgres + opensearch to be healthy
+3. Runs `alembic upgrade head` (DB schema upgrade)
+4. Starts FastAPI uvicorn (foreground, Ctrl-C to stop; clears any stale uvicorn first to avoid Errno 48)
 
-跑完之後 6 個服務都在運作。**要用商品搜尋,還需建向量索引——見下方 [🔍 商品搜尋引擎](#-商品搜尋引擎hybrid-search-setup)。**
+After that all 6 services are running. **For product search you still need to build the vector index — see [🔍 Product Search Engine](#-product-search-engine-hybrid-search-setup) below.**
 
 ---
 
-## 🔍 商品搜尋引擎(Hybrid Search) setup
+## 🔍 Product Search Engine (Hybrid Search) setup
 
-`search_engine` 是與 `recommender` 平行的獨立模組,把本公司 26k 商品做 **hybrid 搜尋 = BM25(詞面)+ k-NN(Cohere Embed v4 語意向量)+ min-max 融合**。架構詳見 [`docs/architecture/search-architecture.md`](./docs/architecture/search-architecture.md)。
+`search_engine` is a standalone module parallel to `recommender`, running **hybrid search over 26k products = BM25 (lexical) + k-NN (Cohere Embed v4 semantic vectors) + min-max fusion**. Details in [`docs/architecture/search-architecture.md`](./docs/architecture/search-architecture.md).
 
-### 同事一鍵 onboarding(從零到能搜)
+### One-command onboarding (from zero to searchable)
 
 ```bash
-# 1. clone 後,自行放置 26k 商品 seed 到 products/OpenSearch_Full_*.json
-#    (含商品資料,未隨公開 repo 發佈;路徑見 scripts/etl/load_products_os.py 的 SOURCE_FILE)
+# 1. After clone, place the 26k product seed at products/OpenSearch_Full_*.json yourself
+#    (contains product data, NOT shipped with the public repo; path in scripts/etl/load_products_os.py SOURCE_FILE)
 git clone <repo> && cd marketing-recommandation && uv sync
 
-# 2. 刷 AWS lab 憑證(向量化要打 Bedrock Cohere v4,需要憑證)
-make refresh-creds                # ~1hr 過期;或 make refresh-creds-mfa 一次撐 24h
+# 2. Refresh AWS lab credentials (vectorization calls Bedrock Cohere v4, needs credentials)
+make refresh-creds                # expires ~1hr; or make refresh-creds-mfa for a 24h session
 
-# 3. 起服務(會自動把 OpenSearch 一起起來)
-make dev                          # foreground;OpenSearch healthy 後 FastAPI 才起
+# 3. Start services (brings OpenSearch up too)
+make dev                          # foreground; FastAPI starts only after OpenSearch is healthy
 
-# 4. (另開 terminal)一鍵建向量索引:load 26k → Cohere v4 全量嵌入
-make search-setup                 # ⚠️ embed 走真 Bedrock,一次性 ~$1、約 15–30 分鐘、可續跑
+# 4. (new terminal) build the vector index: load 26k → full Cohere v4 embedding
+make search-setup                 # ⚠️ embed calls real Bedrock, one-off ~$1, ~15–30 min, resumable
 
-# 5. 開搜尋測試 UI
-open ui/search.html               # 純 HTML,打 localhost:8000/search
+# 5. Open the search test UI
+open ui/search.html               # plain HTML, hits localhost:8000/search
 ```
 
-跑完 `make search-setup` 後,OpenSearch 裡會有 `products_v5_cohere` 索引(26,014 筆全嵌)。打開 `ui/search.html` 輸入「冬天手腳冰冷」「氣炸鍋」「久坐肩頸痠痛」就能看到結果(只顯示相關度 ≥0.26 的)。
+After `make search-setup`, OpenSearch holds the `products_v5_cohere` index (26,014 docs fully embedded). Open `ui/search.html` and try queries like "cold hands and feet in winter", "air fryer", "neck and shoulder pain from sitting" to see results (only relevance ≥ 0.26 shown).
 
-### 重點與常見坑
+### Key points & common pitfalls
 
-| 項目 | 說明 |
+| Item | Notes |
 |------|------|
-| **向量模型** | Cohere Embed v4(`cohere.embed-v4:0`)/ 1536 維 / region `ap-northeast-1`。索引 `products_v5_cohere`,融合權重 `w_bm25=0.2`(config 可調)。 |
-| **憑證** | app 的搜尋向量化走 `lab` profile **自動續期**(`aws_profile=lab`);`.env.local` 靜態憑證受 AWS role chaining 限制最長 1h。整天不想重輸 MFA → `make refresh-creds-mfa`(需先 `export AWS_MFA_ACCESS_KEY_ID/SECRET`)。 |
-| **search 500** | 多半是憑證過期。`make refresh-creds` 後**重啟 `make dev`**(process 啟動時讀憑證)。 |
-| **成本** | `make search-embed`(含在 search-setup)是 26k × Cohere v4 ≈ <$1 一次性。重跑冪等只補缺、不重複計費。 |
-| **重建/換索引** | `make search-setup SEARCH_INDEX=products_v6` 可指定別的索引名。 |
+| **Vector model** | Cohere Embed v4 (`cohere.embed-v4:0`) / 1536 dims / region `ap-northeast-1`. Index `products_v5_cohere`, fusion weight `w_bm25=0.2` (configurable). |
+| **Credentials** | App vectorization uses the `lab` profile with **auto-renewal** (`aws_profile=lab`); static `.env.local` credentials are capped at ~1h by AWS role chaining. To avoid re-entering MFA all day → `make refresh-creds-mfa` (first `export AWS_MFA_ACCESS_KEY_ID/SECRET`). |
+| **search 500** | Usually expired credentials. Run `make refresh-creds` then **restart `make dev`** (credentials are read at process start). |
+| **Cost** | `make search-embed` (part of search-setup) is 26k × Cohere v4 ≈ <$1 one-off. Reruns are idempotent — only fills gaps, no double charging. |
+| **Rebuild / switch index** | `make search-setup SEARCH_INDEX=products_v6` targets a different index name. |
 
 ---
 
-## 📦 服務清單(Docker stack)
+## 📦 Services (Docker stack)
 
-| 服務 | Port | 用途 | 怎麼看 |
+| Service | Port | Purpose | How to inspect |
 |------|------|------|--------|
 | **FastAPI** | 8000 | API server | http://localhost:8000/docs (Swagger UI) |
-| **Postgres** | 5434 | 主 DB(PipelineJob / Recommendation 等表)| http://localhost:8081 (Adminer) |
-| **Redis** | 6380 | POC 預留(目前未用) | `redis-cli -p 6380 -a redispoc PING` |
-| **LocalStack** | 4567 | 模擬 AWS S3(raw / cleaned bucket)| `awslocal --endpoint-url=http://localhost:4567 s3 ls` |
+| **Postgres** | 5434 | Main DB (PipelineJob / Recommendation tables) | http://localhost:8081 (Adminer) |
+| **Redis** | 6380 | Reserved for POC (unused for now) | `redis-cli -p 6380 -a redispoc PING` |
+| **LocalStack** | 4567 | Mock AWS S3 (raw / cleaned buckets) | `awslocal --endpoint-url=http://localhost:4567 s3 ls` |
 | **Adminer** | 8081 | Postgres GUI | http://localhost:8081 (server: postgres / user: poc / pass: poc / db: marketing_cleaner) |
-| **OpenSearch** | 9200 | 商品 hybrid 搜尋(k-NN + BM25)| `curl localhost:9200/_cat/indices` (找 `products_v5_cohere`) |
+| **OpenSearch** | 9200 | Product hybrid search (k-NN + BM25) | `curl localhost:9200/_cat/indices` (look for `products_v5_cohere`) |
 
-**Port 為什麼這些?** 跟 intellio.ai 公司既有 docker stack 錯開,可同時跑互不干擾(intellio.ai 用 5433 / 6379 / 4566)。
+**Why these ports?** Offset from intellio.ai's existing docker stack so both can run side by side without conflict (intellio.ai uses 5433 / 6379 / 4566).
 
 ---
 
-## 🛠 Make Commands(統一介面)
+## 🛠 Make Commands (unified interface)
 
 ```bash
-make help                         # 列出所有指令
+make help                         # list all commands
 ```
 
-### 啟動 / 停止
+### Start / stop
 
 ```bash
-make dev                          # 一鍵啟動全部(infra + migration + FastAPI)
-make infra-up                     # 只起 5 個 docker(含 opensearch)不起 FastAPI
-make infra-status                 # 看 docker 服務狀態
-make infra-down                   # 停 docker(保留 DB 資料)
-make infra-clean                  # ⚠️ 停 docker + 清掉 volume(DB 資料消失!)
+make dev                          # start everything (infra + migration + FastAPI)
+make infra-up                     # only the 5 docker containers (incl. opensearch), no FastAPI
+make infra-status                 # docker service status
+make infra-down                   # stop docker (keep DB data)
+make infra-clean                  # ⚠️ stop docker + wipe volumes (DB data is lost!)
 ```
 
-### 開發 / 操作
+### Develop / operate
 
 ```bash
-make migrate                      # 只跑 alembic upgrade(infra 要先起)
-make api                          # 只起 FastAPI(不重起 docker)
-make health                       # 健康檢查(FastAPI + docker 容器)
+make migrate                      # run alembic upgrade only (infra must be up)
+make api                          # start FastAPI only (no docker restart)
+make health                       # health check (FastAPI + docker containers)
 ```
 
-### 商品搜尋(向量索引)
+### Product search (vector index)
 
 ```bash
-make search-setup                 # 🔍 一鍵建索引:load 26k + Cohere v4 全量嵌入(⚠️ ~$1 Bedrock)
-make search-load                  # 只建索引 + 載入商品(無 embedding,free)
-make search-embed                 # ⚠️ 只跑 Cohere v4 向量化(真 Bedrock,可續跑)
-make search-verify Q=手腳冰冷      # 搜尋 smoke 測試(curl /search)
+make search-setup                 # 🔍 build index in one go: load 26k + full Cohere v4 embedding (⚠️ ~$1 Bedrock)
+make search-load                  # build index + load products only (no embedding, free)
+make search-embed                 # ⚠️ Cohere v4 vectorization only (real Bedrock, resumable)
+make search-verify Q=cold-hands   # search smoke test (curl /search)
 ```
 
 ### AWS
 
 ```bash
-make refresh-creds                # 刷新 lab 暫時憑證(~1hr 過期就跑,免 MFA)
-make refresh-creds-mfa            # 用 MFA 把基底 session 刷成 24h(需先 export AWS_MFA_ACCESS_KEY_ID/SECRET)
+make refresh-creds                # refresh lab temporary credentials (run when ~1hr expires, no MFA)
+make refresh-creds-mfa            # use MFA to refresh the base session to 24h (first export AWS_MFA_ACCESS_KEY_ID/SECRET)
 ```
 
-### 跑分析(端到端 demo)
+### Run analysis (end-to-end demo)
 
 ```bash
-make analyze MONTH=2026-04        # 觸發某月分析(背景跑 ~50s)
-make list-analyses                # 列出已分析月份
-make narrative MONTH=2026-04      # 拉 markdown brief
+make analyze MONTH=2026-04        # trigger a month's analysis (runs in background ~50s)
+make list-analyses                # list analyzed months
+make narrative MONTH=2026-04      # pull the markdown brief
 ```
 
-### ETL standalone(不走 API)
+### ETL standalone (without the API)
 
 ```bash
-make etl-april                    # 跑 4 月 3 個 ETL script,結果寫 out/
+make etl-april                    # run April's 3 ETL scripts, output to out/
 ```
 
 ---
 
-## 🐳 Docker 服務啟動詳解
+## 🐳 Docker startup details
 
-### 第一次:確認 Docker daemon 在跑
+### First: make sure the Docker daemon is running
 
-macOS 推薦用 **OrbStack**(輕量、快,取代 Docker Desktop):
+On macOS we recommend **OrbStack** (lightweight, fast, a Docker Desktop replacement):
 
 ```bash
-brew install --cask orbstack       # 第一次安裝
-open -a OrbStack                   # 啟動
+brew install --cask orbstack       # first-time install
+open -a OrbStack                   # start
 ```
 
-確認 daemon 通:
+Confirm the daemon is reachable:
 ```bash
-docker ps                          # 沒報錯 = OK
+docker ps                          # no error = OK
 ```
 
-### 啟動 5 個 infra 容器
+### Start the 5 infra containers
 
 ```bash
 make infra-up
-# 等價於:
+# equivalent to:
 # docker compose -f docker-compose.dev.yml --env-file .env.local up -d postgres redis localstack adminer opensearch
 ```
 
-第一次起會做 3 件事:
-1. **拉 image**(postgres:17 / redis:7-alpine / localstack:3.8 / adminer:latest / opensearch:2.19.x)
-2. **建 named volumes**(`postgres_data`、`redis_data`、`localstack_data`、`opensearch_data`)— 資料持久化
-3. **LocalStack `ready.d` 自動執行 `scripts/localstack/init-buckets.sh`** — 建 raw-data / cleaned-data buckets + 把 `aws-s3/` 同步上去
+The first start does 3 things:
+1. **Pulls images** (postgres:17 / redis:7-alpine / localstack:3.8 / adminer:latest / opensearch:2.19.x)
+2. **Creates named volumes** (`postgres_data`, `redis_data`, `localstack_data`, `opensearch_data`) — data persistence
+3. **LocalStack `ready.d` auto-runs `scripts/localstack/init-buckets.sh`** — creates raw-data / cleaned-data buckets + syncs `aws-s3/` up
 
-### 確認容器都 healthy
+### Confirm all containers are healthy
 
 ```bash
 make infra-status
 ```
 
-預期看到:
+Expected:
 ```
 NAME                          STATUS
 marketing-poc-postgres        Up X seconds (healthy)
@@ -182,187 +182,186 @@ marketing-poc-adminer         Up X seconds
 marketing-poc-opensearch      Up X seconds (healthy)
 ```
 
-如果 STATUS 是 `(starting)`,等 30 秒再看。如果是 `(unhealthy)` 或 `Restarting`,先 `make infra-down` 再 `make infra-up`。
+If STATUS is `(starting)`, wait 30s and re-check. If `(unhealthy)` or `Restarting`, run `make infra-down` then `make infra-up`.
 
-### 起 FastAPI(infra 都 ready 後)
+### Start FastAPI (after infra is ready)
 
 ```bash
 make api
 ```
 
-或一氣呵成:`make dev`(包含 migration + FastAPI)。
+Or all at once: `make dev` (includes migration + FastAPI).
 
-### 停止
+### Stop
 
 ```bash
-make infra-down                    # 停容器,保留 volume(下次 up 資料還在)
-make infra-clean                   # ⚠️ 連 volume 一起清,DB 重置
+make infra-down                    # stop containers, keep volumes (data survives next up)
+make infra-clean                   # ⚠️ also wipe volumes, DB reset
 ```
 
-### 常見錯誤
+### Common errors
 
-| 訊息 | 原因 | 解法 |
+| Message | Cause | Fix |
 |------|------|------|
-| `Cannot connect to the Docker daemon at unix:///...orbstack` | OrbStack 沒啟動 | `open -a OrbStack` |
-| `port is already allocated` | 5434/6380/4567/8081 被佔 | `lsof -i :{port}` 找誰佔,或停掉 |
-| `database "marketing_cleaner" does not exist` | 第一次起,init script 還沒跑完 | 等 30 秒,或 `make infra-down` 後再 up |
-| FastAPI 401 / search 500 on Bedrock | lab 憑證過期(~1 小時) | `make refresh-creds` 後**重啟 `make dev`**(process 啟動時讀憑證);整天免重輸 → `make refresh-creds-mfa` |
-| `make dev` 報 `Errno 48 Address already in use` | 殘留 uvicorn 佔住 8000 | dev.sh 已會自清;若仍卡 `lsof -ti:8000 \| xargs kill -9` |
+| `Cannot connect to the Docker daemon at unix:///...orbstack` | OrbStack not started | `open -a OrbStack` |
+| `port is already allocated` | 5434/6380/4567/8081 taken | `lsof -i :{port}` to find the owner, or stop it |
+| `database "marketing_cleaner" does not exist` | first start, init script not done yet | wait 30s, or `make infra-down` then up |
+| FastAPI 401 / search 500 on Bedrock | lab credentials expired (~1 hour) | `make refresh-creds` then **restart `make dev`** (credentials read at process start); to avoid re-entering all day → `make refresh-creds-mfa` |
+| `make dev` reports `Errno 48 Address already in use` | stale uvicorn holding 8000 | dev.sh already self-cleans; if still stuck `lsof -ti:8000 \| xargs kill -9` |
 
 ---
 
-## 🔥 跑一次完整端到端
+## 🔥 Run a full end-to-end
 
 ```bash
-# 1. 起服務
-make dev    # 在另一個 terminal,因為 dev 是 foreground
+# 1. Start services
+make dev    # in another terminal, since dev is foreground
 
-# 2. (新 terminal) 觸發 4 月分析
+# 2. (new terminal) trigger April analysis
 make analyze MONTH=2026-04
-# 等 ~50 秒(99% 是 Bedrock latency)
+# wait ~50s (99% is Bedrock latency)
 
-# 3. 看分析報告
+# 3. View the analysis report
 make narrative MONTH=2026-04 | head -50
 
-# 4. 或從 Swagger UI 點點看
+# 4. Or click around in Swagger UI
 open http://localhost:8000/docs
 ```
 
-### 4 月資料(需自行放置)
+### April data (place it yourself)
 
-> 銷售原始資料含商業機密,**未隨公開 repo 發佈**(`aws-s3/` 已 gitignore)。把 sales 4 月 xlsx + manifest 放到 `aws-s3/sales/2026/04/`,LocalStack 啟動時會自動同步進 S3,即可跑 `make analyze MONTH=2026-04`。
+> Raw sales data contains business confidential information and is **NOT shipped with the public repo** (`aws-s3/` is gitignored). Put the April sales xlsx + manifest under `aws-s3/sales/2026/04/`; LocalStack auto-syncs it into S3 on startup, and you can then run `make analyze MONTH=2026-04`.
 
-未來新月份(5 月)資料來時的處理流程見 [`docs/plans/data-governance.md` §9.7](./docs/plans/data-governance.md)。
+The handling flow for future months (e.g. May) is in [`docs/plans/data-governance.md` §9.7](./docs/plans/data-governance.md).
 
 ---
 
-## 🗂 專案結構
+## 🗂 Project structure
 
 ```
 .
-├── Makefile                                ⭐ 統一操作介面
-├── README.md                               本檔
+├── Makefile                                ⭐ unified operation interface
+├── README.md                               this file
 ├── pyproject.toml / uv.lock / .python-version
 ├── Dockerfile                              multi-stage uv build
-├── docker-compose.dev.yml                  本地 5 容器定義(含 opensearch)
-├── .env.local                              環境變數(從 .env.example copy)
+├── docker-compose.dev.yml                  local 5-container definition (incl. opensearch)
+├── .env.local                              environment variables (copied from .env.example)
 │
 ├── alembic/ + alembic.ini                  DB migration
 │
 ├── scripts/
-│   ├── dev.sh                              ← `make dev`(起 infra 含 opensearch + 自清殭屍 + FastAPI)
-│   ├── refresh-lab-creds.sh                ← `make refresh-creds`(lab 憑證 ~1h,免 MFA)
-│   ├── refresh-session-token.sh            ← `make refresh-creds-mfa`(MFA 把基底刷 24h)
-│   ├── localstack/init-buckets.sh          LocalStack ready.d 自動建 bucket + sync fixture
-│   ├── db/                                 DB reset / dump 工具
-│   └── etl/                                ETL + 搜尋 CLI(load_products_os / embed_products_os / judge…)
+│   ├── dev.sh                              ← `make dev` (start infra incl. opensearch + self-clean + FastAPI)
+│   ├── refresh-lab-creds.sh                ← `make refresh-creds` (lab credentials ~1h, no MFA)
+│   ├── refresh-session-token.sh            ← `make refresh-creds-mfa` (MFA refreshes base session to 24h)
+│   ├── localstack/init-buckets.sh          LocalStack ready.d auto-creates buckets + syncs fixtures
+│   ├── db/                                 DB reset / dump tools
+│   └── etl/                                ETL + search CLIs (load_products_os / embed_products_os / judge…)
 │
-├── src/                                    ⭐ 兩個 top-level 套件
-│   ├── recommender/                        🟦 行銷推薦 pipeline(api/services/repositories 三層 + chains)
-│   └── search_engine/                      🟪 商品 hybrid 搜尋(獨立模組,同 app mount、共用 recommender.config)
-│       └─ router/service/repository/fusion/embeddings/client/schemas;三層職責見 architecture.md §5.8
+├── src/                                    ⭐ two top-level packages
+│   ├── recommender/                        🟦 marketing recommendation pipeline (api/services/repositories 3 layers + chains)
+│   └── search_engine/                      🟪 product hybrid search (standalone module, mounted on same app, shares recommender.config)
+│       └─ router/service/repository/fusion/embeddings/client/schemas; layer roles in architecture.md §5.8
 │
-├── ui/search.html                          純 HTML 搜尋測試 UI(打 localhost:8000/search)
-├── products/OpenSearch_Full_*.json   ⭐ 26k 商品 seed(gitignored,未隨公開 repo;自行放置,make search-setup 用)
+├── ui/search.html                          plain HTML search test UI (hits localhost:8000/search)
+├── products/OpenSearch_Full_*.json   ⭐ 26k product seed (gitignored, NOT in public repo; place it yourself, used by make search-setup)
 │
-├── aws-s3/                                 ⭐ S3 source of truth(local mirror,gitignored 未隨公開 repo)
+├── aws-s3/                                 ⭐ S3 source of truth (local mirror, gitignored, NOT in public repo)
 │   ├── products/{category}/{YYYY}/{MM}/products.csv
 │   ├── customers/customers.csv
-│   └── sales/{YYYY}/{MM}/             月度銷售檔(原檔不 rename + manifest)
+│   └── sales/{YYYY}/{MM}/             monthly sales files (originals not renamed + manifest)
 │       └── 04/{xlsx files} + _manifest.json
 │
-├── out/                                    ETL 本地產出(gitignored)
+├── out/                                    ETL local output (gitignored)
 └── docs/
-    ├── architecture/architecture.md         ⭐ 主架構文件(讀這個!)
+    ├── architecture/architecture.md         ⭐ main architecture doc (read this!)
     └── plans/
         ├── README.md
-        └── data-governance.md               Phase 1.5 計畫 + 實際 outcome
+        └── data-governance.md               Phase 1.5 plan + actual outcome
 ```
 
 ---
 
-## 🔑 關鍵環境變數(`.env.local`)
+## 🔑 Key environment variables (`.env.local`)
 
-| 變數 | 預設 | 說明 |
+| Variable | Default | Notes |
 |------|------|------|
-| `ANALYZER_MOCK_MODE` | `true` | true=回 fixture / **搜尋向量化也走 mock(回固定向量,結果無意義)**;要真搜尋設 `false` 打真 Cohere |
-| `BEDROCK_MODEL_ID` | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | Sonnet 4.5 cross-region inference profile(注意 `us.` 前綴必要) |
+| `ANALYZER_MOCK_MODE` | `true` | true = return fixtures / **search vectorization also mocked (returns fixed vectors, meaningless results)**; set `false` for real search hitting real Cohere |
+| `BEDROCK_MODEL_ID` | `us.anthropic.claude-sonnet-4-5-20250929-v1:0` | Sonnet 4.5 cross-region inference profile (the `us.` prefix is required) |
 | `BEDROCK_REGION` | `us-east-1` | |
-| `AWS_ACCESS_KEY_ID` / `_SECRET_` / `_SESSION_TOKEN` | (refresh-creds.sh 寫入) | lab role 暫時憑證(~1 小時過期,AWS role chaining 上限) |
-| `AWS_PROFILE` | `lab` | 搜尋向量化的 boto3 走此 profile **自動續期**(config 預設 `lab`,不必設) |
-| **`BEDROCK_EMBED_MODEL_ID`** | `cohere.embed-v4:0` | 商品搜尋向量模型(Cohere Embed v4) |
-| **`BEDROCK_EMBED_REGION`** / **`EMBED_DIMENSIONS`** | `ap-northeast-1` / `1536` | embedding region 與維度 |
-| **`OPENSEARCH_INDEX`** / **`SEARCH_BM25_WEIGHT`** | `products_v5_cohere` / `0.2` | 搜尋索引名與融合權重 |
-| `AWS_ENDPOINT_URL_S3` | `http://localhost:4567` | 設了走 LocalStack,留空走真 AWS |
+| `AWS_ACCESS_KEY_ID` / `_SECRET_` / `_SESSION_TOKEN` | (written by refresh-creds.sh) | lab role temporary credentials (~1 hour expiry, AWS role chaining cap) |
+| `AWS_PROFILE` | `lab` | boto3 uses this profile for search vectorization with **auto-renewal** (config default `lab`, no need to set) |
+| **`BEDROCK_EMBED_MODEL_ID`** | `cohere.embed-v4:0` | product search vector model (Cohere Embed v4) |
+| **`BEDROCK_EMBED_REGION`** / **`EMBED_DIMENSIONS`** | `ap-northeast-1` / `1536` | embedding region and dimensions |
+| **`OPENSEARCH_INDEX`** / **`SEARCH_BM25_WEIGHT`** | `products_v5_cohere` / `0.2` | search index name and fusion weight |
+| `AWS_ENDPOINT_URL_S3` | `http://localhost:4567` | set = use LocalStack, empty = real AWS |
 | `S3_RAW_BUCKET` / `S3_CLEANED_BUCKET` | `raw-data` / `cleaned-data` | |
-| `S3_ROOT_PREFIX` | `marketing-recommandation` | 所有 key 都在這 prefix 下 |
+| `S3_ROOT_PREFIX` | `marketing-recommandation` | all keys live under this prefix |
 | `DATABASE_URL` | `postgresql+asyncpg://poc:poc@localhost:5434/marketing_cleaner` | |
 
 ---
 
-## 🧬 Prompt 版本管理
+## 🧬 Prompt Version Management
 
-專案的 prompt 一律走 **versioning,不 hardcode**。有兩條互補路徑:
+Prompts always go through **versioning, never hardcoded**. There are two complementary paths:
 
-### 1. In-repo 檔案版本(預設,隨程式碼走的技術 prompt)
+### 1. In-repo file versioning (default, for technical prompts that travel with the code)
 
-prompt 本體存 `prompts/{module}/{version}.md`,由 `recommender.prompts.load_system_prompt()` 編譯成 LangChain `ChatPromptTemplate`。版本 = 檔名 + 呼叫端的 `*_PROMPT_VERSION` 常數;**發布即 immutable**——改內容請發新版(`v1.1`)並更新常數,不要原地改檔(避免 A/B 時新舊混用)。
+The prompt body lives in `prompts/{module}/{version}.md`, compiled into a LangChain `ChatPromptTemplate` by `recommender.prompts.load_system_prompt()`. The version = file name + the caller's `*_PROMPT_VERSION` constant; **published means immutable** — to change content, publish a new version (`v1.1`) and update the constant rather than editing in place (avoids mixing old/new during A/B).
 
-| prompt | 檔案 | 版本常數 | 用途 |
+| prompt | file | version constant | purpose |
 |--------|------|----------|------|
-| recommendation | `prompts/recommendation/v1.0.md` | `chains/recommendation.py: RECOMMENDATION_PROMPT_VERSION` | 推薦報告生成 |
-| judge | `prompts/judge/v1.0.md` | `chains/judge.py: JUDGE_PROMPT_VERSION` | LLM-as-judge 評估 |
+| recommendation | `prompts/recommendation/v1.0.md` | `chains/recommendation.py: RECOMMENDATION_PROMPT_VERSION` | recommendation report generation |
+| judge | `prompts/judge/v1.0.md` | `chains/judge.py: JUDGE_PROMPT_VERSION` | LLM-as-judge evaluation |
 
-### 2. LangSmith Prompt Hub(要 UI 調整、A/B、與部署解耦時)
+### 2. LangSmith Prompt Hub (when you want UI editing, A/B, or decoupling from deploys)
 
-LangSmith tracing 已透過環境變數啟用(見 `agent_service._build_llm`)。Prompt Hub 額外提供集中式版本控管:
+LangSmith tracing is already enabled via environment variables (see `agent_service._build_llm`). Prompt Hub adds centralized version control:
 
 ```python
 from langsmith import Client
-client = Client()                      # 讀 LANGSMITH_API_KEY(放 .env.local)
+client = Client()                      # reads LANGSMITH_API_KEY (from .env.local)
 
-# 推一版 = 一個 commit(唯一 hash);預設 private
+# one push = one commit (unique hash); private by default
 client.push_prompt("my-prompt", object=chat_prompt_template)
 
-# 拉取:最新 / 用 tag(prod、dev)/ 用 commit hash 鎖版
+# pull: latest / by tag (prod, dev) / pin by commit hash
 prompt = client.pull_prompt("my-prompt")
 prompt = client.pull_prompt("my-prompt:production")
 prompt = client.pull_prompt("my-prompt:<commit_hash>")
 ```
 
-| 面向 | 做法 |
+| Aspect | How |
 |------|------|
-| **版本** | 每次 `push_prompt` 自動產生一個 commit;UI 的 **Commits** 分頁可看 diff、回滾、鎖版 |
-| **切換不改 code** | 給穩定版貼 tag(`production` / `dev`),程式用 `pull_prompt("name:production")` 拉,換版只切 tag |
-| **A/B** | `client.evaluate(target, data=..., experiment_prefix="v1")` 各版各跑一次;或 `evaluate((expA, expB), evaluators=[...])` 做 pairwise 對決(需 `langsmith>=0.2.0`)|
-| **權限** | prompt 預設 **private**(只有自己的 workspace 看得到);公開需主動設並綁 workspace 共用 handle |
+| **Versioning** | each `push_prompt` creates a commit; the UI **Commits** tab shows diffs, rollback, pinning |
+| **Switch without code change** | tag a stable version (`production` / `dev`), pull with `pull_prompt("name:production")`, switch versions by moving the tag |
+| **A/B** | `client.evaluate(target, data=..., experiment_prefix="v1")` runs each version once; or `evaluate((expA, expB), evaluators=[...])` for pairwise comparison (needs `langsmith>=0.2.0`) |
+| **Access** | prompts are **private** by default (only your workspace sees them); going public requires opt-in and a shared workspace handle |
 
-> **機密原則**:含敏感業務內容的 prompt **不入本 repo**,一律存 LangSmith **private**;只有隨程式碼走的技術 prompt(recommendation / judge)放 `prompts/`。判斷準則:技術可公開、業務打法要藏。`LANGSMITH_API_KEY` 放 `.env.local`(已 gitignore),**絕不 commit**。
+> **Confidentiality principle**: prompts containing sensitive business content are **not committed to this repo** — they live in LangSmith **private** only; only technical prompts that travel with the code (recommendation / judge) go under `prompts/`. Rule of thumb: tech can be public, go-to-market plays stay hidden. `LANGSMITH_API_KEY` lives in `.env.local` (gitignored) and is **never committed**.
 
-長 prompt / 大輸入的結構建議(資料置頂、查詢置尾、`<documents>` 包裝、先引用再作答)見 [Claude 官方 long-context prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)。
-
----
-
-## 📚 進一步閱讀
-
-- [`docs/architecture/architecture.md`](./docs/architecture/architecture.md) — 完整架構(三層 + DI + 兩條 pipeline + S3 layout + Bedrock 整合)
-- [`docs/architecture/search-architecture.md`](./docs/architecture/search-architecture.md) — 🔍 **搜尋子系統權威文件**(Cohere v4 + BM25 hybrid、min-max 融合、失敗模式、架構圖)
-- [`docs/plans/data-governance.md`](./docs/plans/data-governance.md) — Phase 1.5 ETL 計畫 + 實際 outcome(§9 含技術債 + 5 月實作步驟)
-- `~/.claude/projects/.../memory/MEMORY.md` — 4 條業務脈絡 fact(本公司 客戶 = 經銷商、月度節奏、ETL first 等)
+For structuring long prompts / large inputs (data first, query last, `<documents>` wrapping, ground-in-quotes), see [Claude's official long-context prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices).
 
 ---
 
-## 🎯 Phase 狀態速覽
+## 📚 Further reading
 
-| Phase | 範圍 | 狀態 |
+- [`docs/architecture/architecture.md`](./docs/architecture/architecture.md) — full architecture (3 layers + DI + two pipelines + S3 layout + Bedrock integration)
+- [`docs/architecture/search-architecture.md`](./docs/architecture/search-architecture.md) — 🔍 **authoritative search subsystem doc** (Cohere v4 + BM25 hybrid, min-max fusion, failure modes, diagrams)
+- [`docs/plans/data-governance.md`](./docs/plans/data-governance.md) — Phase 1.5 ETL plan + actual outcome (§9 covers tech debt + May implementation steps)
+
+---
+
+## 🎯 Phase status at a glance
+
+| Phase | Scope | Status |
 |-------|------|------|
 | 0 | Scaffolding | ✅ |
-| 1 | 真 Bedrock 整合 | ✅ |
-| 1.5 | ETL 真實邏輯 | ✅ scope pivot,實作 sales analysis |
+| 1 | Real Bedrock integration | ✅ |
+| 1.5 | Real ETL logic | ✅ scope pivot, implemented sales analysis |
 | 1.6 | `/analyses/sales` API + Bedrock narrative | ✅ |
-| 2（search）| 🔍 商品 hybrid 搜尋(`search_engine` 模組:Cohere v4 + BM25 + min-max,`GET /search`)| ✅ |
+| 2 (search) | 🔍 product hybrid search (`search_engine` module: Cohere v4 + BM25 + min-max, `GET /search`) | ✅ |
 | 2 | Prompt management | ⏸ |
-| 3 | Evaluation pipeline(LLM-as-judge) | ⏸ |
-| 4 | SharePoint → S3 自動 sync 腳本 | ⏸ |
+| 3 | Evaluation pipeline (LLM-as-judge) | ⏸ |
+| 4 | SharePoint → S3 auto-sync script | ⏸ |
 | 5 | HubSpot Renderer + Sync | ⏸ |
 | 6 | Production hardening | ⏸ |
