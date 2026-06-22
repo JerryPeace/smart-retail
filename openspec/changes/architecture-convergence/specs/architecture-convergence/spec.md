@@ -1,118 +1,118 @@
 # Spec: architecture-convergence
 
-本規格定義收斂後的四份「契約」：分層契約、錯誤處理契約、settings 契約、測試契約。實作完成後，任何違反下列 Requirement 的 code 視為未通過驗收。
+This spec defines the four "contracts" after convergence: the layering contract, the error-handling contract, the settings contract, and the testing contract. Once implementation is complete, any code that violates one of the Requirements below is considered to have failed acceptance.
 
 ## ADDED Requirements
 
-### Requirement: 分層契約 — API 層只依賴 service
+### Requirement: Layering contract — the API layer depends only on services
 
-API router（`src/recommender/api/*.py`）SHALL 只注入 service（經 `deps.py` 的 `*ServiceDep`），SHALL NOT 注入 repository、SHALL NOT 執行 ORM→DTO 轉換、SHALL NOT 拋 `HTTPException`。
+API routers (`src/recommender/api/*.py`) SHALL only inject services (via `deps.py`'s `*ServiceDep`), SHALL NOT inject repositories, SHALL NOT perform ORM→DTO conversion, and SHALL NOT raise `HTTPException`.
 
-#### Scenario: read 端點走 service
-- **WHEN** client 呼叫 `GET /recommendations/{id}`、`GET /recommendations/by-customer/{id}`、`GET /evaluations/{id}`、`GET /evaluations/by-recommendation/{id}`、`GET /pipelines/{id}`
-- **THEN** router 僅呼叫對應 service 方法並回傳其結果，函式體內無 `if x is None: raise` 分支
+#### Scenario: read endpoints go through a service
+- **WHEN** a client calls `GET /recommendations/{id}`, `GET /recommendations/by-customer/{id}`, `GET /evaluations/{id}`, `GET /evaluations/by-recommendation/{id}`, or `GET /pipelines/{id}`
+- **THEN** the router only calls the corresponding service method and returns its result, with no `if x is None: raise` branch in the function body
 
-#### Scenario: API 層靜態檢查
-- **WHEN** 執行 `grep -rn "HTTPException\|RepoDep" src/recommender/api/`
-- **THEN** `HTTPException` 為 0 筆；`*RepoDep` 注入為 0 筆
+#### Scenario: static check of the API layer
+- **WHEN** running `grep -rn "HTTPException\|RepoDep" src/recommender/api/`
+- **THEN** `HTTPException` has 0 hits; `*RepoDep` injections have 0 hits
 
-### Requirement: 分層契約 — Service 層回傳 Pydantic DTO
+### Requirement: Layering contract — the Service layer returns Pydantic DTOs
 
-Service 對 API 層暴露的公開方法 SHALL 回傳 Pydantic DTO（`RecommendationPublic` / `EvaluationPublic` / `JobResponse`），SHALL NOT 回傳 SQLModel ORM 物件。Service 是唯一允許讀取 `settings`、執行跨 repository 編排、與做 ORM→DTO 轉換的層。
+The public methods a service exposes to the API layer SHALL return Pydantic DTOs (`RecommendationPublic` / `EvaluationPublic` / `JobResponse`), and SHALL NOT return SQLModel ORM objects. The service is the only layer permitted to read `settings`, perform cross-repository orchestration, and do ORM→DTO conversion.
 
-#### Scenario: 各 service 回傳型別
-- **WHEN** 檢視 `RecommendationService.get/list_by_customer`、`EvaluationService.evaluate/get/list_by_recommendation`、`PipelineService.create_job/get_job` 的回傳型別註記
-- **THEN** 分別為 `RecommendationPublic`（含 list）、`EvaluationPublic`（含 list）、`JobResponse`，無任何 `-> Recommendation` / `-> Evaluation` / `-> PipelineJob`
+#### Scenario: return types of each service
+- **WHEN** inspecting the return type annotations of `RecommendationService.get/list_by_customer`, `EvaluationService.evaluate/get/list_by_recommendation`, and `PipelineService.create_job/get_job`
+- **THEN** they are respectively `RecommendationPublic` (including list), `EvaluationPublic` (including list), and `JobResponse`, with no `-> Recommendation` / `-> Evaluation` / `-> PipelineJob`
 
-#### Scenario: 薄 read service 不過度設計
-- **WHEN** 檢視 `RecommendationService` 與 `EvaluationService` 的 read 方法
-- **THEN** 為普通 class 的普通 async 方法（建構子注入 repo），不存在 interface、抽象基類、generic base 等新抽象
+#### Scenario: thin read services are not over-designed
+- **WHEN** inspecting the read methods of `RecommendationService` and `EvaluationService`
+- **THEN** they are plain async methods on a plain class (with the repo injected via the constructor); no new abstraction such as an interface, abstract base class, or generic base exists
 
-### Requirement: 分層契約 — Repository 層純 CRUD
+### Requirement: Layering contract — the Repository layer is pure CRUD
 
-Repository（`src/recommender/repositories/*.py`）SHALL 只做 CRUD：不 import `recommender.config`、不含業務判斷、不呼叫外部服務。業務參數（如 `model_id`）SHALL 由 caller 以參數傳入。
+Repositories (`src/recommender/repositories/*.py`) SHALL only do CRUD: not import `recommender.config`, contain no business decisions, and not call external services. Business parameters (such as `model_id`) SHALL be passed in by the caller as arguments.
 
-#### Scenario: create_from_agent_output 不讀 settings
-- **WHEN** `PipelineService.run()` 寫入 recommendation
-- **THEN** `create_from_agent_output(..., model_id=...)` 的 `model_id` 由 service 傳入（值為 `settings.bedrock_model_id`，與收斂前寫入內容一致）
-- **AND** `grep -rn "from recommender.config import settings" src/recommender/repositories/` 為 0 筆
+#### Scenario: create_from_agent_output does not read settings
+- **WHEN** `PipelineService.run()` writes a recommendation
+- **THEN** the `model_id` of `create_from_agent_output(..., model_id=...)` is passed in by the service (the value being `settings.bedrock_model_id`, identical to what was written before convergence)
+- **AND** `grep -rn "from recommender.config import settings" src/recommender/repositories/` has 0 hits
 
-### Requirement: 錯誤處理契約 — 單一 NotFoundError 流
+### Requirement: Error-handling contract — a single NotFoundError flow
 
-「查無資源」SHALL 只有一種表達：`recommender.errors.NotFoundError`。repository 的 read 方法（`get` 系列）回 `None`，由 service 判斷後拋 `NotFoundError`；repository 寫入路徑的前置查找失敗（如 `job_repo.update_status`）直接拋 `NotFoundError`。API 層不拋、不接 —— 例外由 `main.py:65` 的全域 handler 轉 HTTP 404（`{"detail": str(exc)}`），未預期例外由 `main.py:71` 的 handler 轉 500。
+"Resource not found" SHALL have exactly one expression: `recommender.errors.NotFoundError`. A repository's read methods (the `get` family) return `None`, and the service decides and then raises `NotFoundError`; when a precondition lookup on a repository write path fails (such as `job_repo.update_status`), it raises `NotFoundError` directly. The API layer neither raises nor catches it — the exception is converted to HTTP 404 by the global handler at `main.py:65` (`{"detail": str(exc)}`), and unexpected exceptions are converted to 500 by the handler at `main.py:71`.
 
-#### Scenario: 查無資源回 404
-- **WHEN** client 以不存在的 id 呼叫 `GET /pipelines/{id}`、`GET /recommendations/{id}`、`GET /evaluations/{id}` 或 `POST /evaluations/{id}`
-- **THEN** 回 `404` + JSON body `{"detail": "... not found"}`
+#### Scenario: missing resource returns 404
+- **WHEN** a client calls `GET /pipelines/{id}`, `GET /recommendations/{id}`, `GET /evaluations/{id}`, or `POST /evaluations/{id}` with a nonexistent id
+- **THEN** it returns `404` + JSON body `{"detail": "... not found"}`
 
-#### Scenario: repository 不再拋 ValueError 表達查無
-- **WHEN** `JobRepository.update_status` 收到不存在的 `job_id`
-- **THEN** 拋 `NotFoundError`，且 `grep -rn "raise ValueError" src/recommender/repositories/` 為 0 筆
+#### Scenario: repositories no longer raise ValueError to express not-found
+- **WHEN** `JobRepository.update_status` receives a nonexistent `job_id`
+- **THEN** it raises `NotFoundError`, and `grep -rn "raise ValueError" src/recommender/repositories/` has 0 hits
 
-#### Scenario: BackgroundTask 例外不經 HTTP handler
-- **WHEN** `PipelineService.run()`（BackgroundTask 內）遭遇例外
-- **THEN** 維持既有行為：`logger.exception` + job 標記 `failed` + re-raise，不期待 HTTP handler 介入
+#### Scenario: BackgroundTask exceptions do not go through the HTTP handler
+- **WHEN** `PipelineService.run()` (inside a BackgroundTask) encounters an exception
+- **THEN** the existing behavior is preserved: `logger.exception` + mark the job `failed` + re-raise, without expecting the HTTP handler to intervene
 
-### Requirement: Settings 契約 — guardrail 欄位正式宣告
+### Requirement: Settings contract — guardrail fields are formally declared
 
-`config.py` 的 `Settings` SHALL 宣告 `bedrock_guardrail_id: str | None = None` 與 `bedrock_guardrail_version: str | None = None`。程式碼 SHALL NOT 以 `getattr(settings, ...)` 讀取任何 Settings 欄位（那是「欄位可能不存在」的掩護寫法，會讓設定靜默失效）。
+`config.py`'s `Settings` SHALL declare `bedrock_guardrail_id: str | None = None` and `bedrock_guardrail_version: str | None = None`. Code SHALL NOT read any Settings field via `getattr(settings, ...)` (that is a cover for "the field might not exist," which silently lets settings fail).
 
-#### Scenario: env var 正常綁定
-- **WHEN** 環境設定 `BEDROCK_GUARDRAIL_ID=gr-xxx` 後啟動 app
-- **THEN** `settings.bedrock_guardrail_id == "gr-xxx"`，且 `AgentService._guardrail_config()` 回含 `guardrailIdentifier` 的 dict（version 未設時 fallback `"DRAFT"`）
+#### Scenario: env var binds correctly
+- **WHEN** the environment sets `BEDROCK_GUARDRAIL_ID=gr-xxx` and the app starts
+- **THEN** `settings.bedrock_guardrail_id == "gr-xxx"`, and `AgentService._guardrail_config()` returns a dict containing `guardrailIdentifier` (falling back to `"DRAFT"` when version is unset)
 
-#### Scenario: 未設定時行為不變
-- **WHEN** 未設 guardrail env var
-- **THEN** `_guardrail_config()` 回 `None`，LLM 呼叫不帶 guardrailConfig（與收斂前一致）
+#### Scenario: behavior unchanged when unset
+- **WHEN** the guardrail env var is not set
+- **THEN** `_guardrail_config()` returns `None`, and LLM calls carry no guardrailConfig (identical to before convergence)
 
-#### Scenario: 全 codebase 無 getattr(settings
-- **WHEN** 執行 `grep -rn "getattr(settings" src/recommender/`
-- **THEN** 0 筆
+#### Scenario: no getattr(settings across the whole codebase
+- **WHEN** running `grep -rn "getattr(settings" src/recommender/`
+- **THEN** 0 hits
 
-### Requirement: Prompt 契約 — .md 檔為唯一 runtime 來源
+### Requirement: Prompt contract — .md files are the sole runtime source
 
-Runtime prompt SHALL 只來自 `prompts/{module}/{version}.md`，由 `prompts.py:load_system_prompt` 載入、版本由 `chains/` 的 `*_PROMPT_VERSION` 常數指定。`PromptVariant` 表與 `prompt_variant_repo` SHALL 保留（dormant、forward-only），但 SHALL NOT 存在指向它的 runtime 死路（`NotImplementedError` stub、永遠為 `None` 的 variant 參數鏈）。
+Runtime prompts SHALL come only from `prompts/{module}/{version}.md`, loaded by `prompts.py:load_system_prompt`, with the version specified by the `*_PROMPT_VERSION` constants in `chains/`. The `PromptVariant` table and `prompt_variant_repo` SHALL be retained (dormant, forward-only), but there SHALL NOT exist any runtime dead end pointing to them (a `NotImplementedError` stub, or an always-`None` variant-parameter chain).
 
-#### Scenario: 死路移除
-- **WHEN** 執行 `grep -rn "NotImplementedError" src/recommender/services/` 與 `grep -rn "prompt_variant_id" src/recommender/services/`
-- **THEN** 皆為 0 筆；`AgentService.analyze()` 回傳 `RecommendationOutput`（非 tuple）
+#### Scenario: dead ends removed
+- **WHEN** running `grep -rn "NotImplementedError" src/recommender/services/` and `grep -rn "prompt_variant_id" src/recommender/services/`
+- **THEN** both have 0 hits; `AgentService.analyze()` returns `RecommendationOutput` (not a tuple)
 
-#### Scenario: 表保留且文件標註
-- **WHEN** 檢視 alembic 與架構文件
-- **THEN** 無 drop `prompt_variant` 的 migration；`docs/architecture/architecture.md` 標註該表為 dormant（未連通、留作 A/B 基建）
+#### Scenario: table retained and documented
+- **WHEN** inspecting alembic and the architecture document
+- **THEN** there is no migration to drop `prompt_variant`; `docs/architecture/architecture.md` annotates the table as dormant (not wired up, kept as A/B infrastructure)
 
-### Requirement: 資料模型契約 — forward-only、零 migration
+### Requirement: Data-model contract — forward-only, zero migration
 
-本變更 SHALL NOT 新增、修改、刪除任何 DB schema。HubSpot 6 欄（`models/recommendation.py:51-58`）SHALL 原封保留並在架構文件標註 Phase 4 reserved。
+This change SHALL NOT add, modify, or delete any DB schema. The 6 HubSpot columns (`models/recommendation.py:51-58`) SHALL be kept untouched and annotated as Phase 4 reserved in the architecture document.
 
-#### Scenario: alembic 狀態不變
-- **WHEN** 比對實作前後的 `alembic current` 輸出與 `alembic/versions/` 目錄
-- **THEN** revision 相同、無新檔案
+#### Scenario: alembic state unchanged
+- **WHEN** comparing the `alembic current` output and the `alembic/versions/` directory before and after implementation
+- **THEN** the revision is identical and there are no new files
 
-### Requirement: 文件契約 — architecture.md 反映真實結構
+### Requirement: Documentation contract — architecture.md reflects the real structure
 
-`docs/architecture/architecture.md` SHALL 與 `src/recommender/` 實際檔案結構一致：不描述已不存在的模組（`SalesAnalysisService` / `api/analyses.py` / `/analyses/sales/*`），且記載所有實際存在的頂層模組（`chains/`、`llm.py`、`prompts.py`、`errors.py`、`deps.py`、`PromoForecastService` 含其「未接 API 的孤兒」狀態）。
+`docs/architecture/architecture.md` SHALL be consistent with the actual file structure of `src/recommender/`: not describing modules that no longer exist (`SalesAnalysisService` / `api/analyses.py` / `/analyses/sales/*`), and documenting all top-level modules that actually exist (`chains/`, `llm.py`, `prompts.py`, `errors.py`, `deps.py`, and `PromoForecastService` including its "orphaned, not wired to the API" state).
 
-#### Scenario: 文件與檔案系統對齊
-- **WHEN** 比對文件目錄樹與 `find src/recommender -name "*.py"` 輸出
-- **THEN** 文件不含已刪除檔案；上述六個現存模組皆有對應段落或目錄樹條目
+#### Scenario: document aligns with the file system
+- **WHEN** comparing the document's directory tree with the output of `find src/recommender -name "*.py"`
+- **THEN** the document contains no deleted files; the six existing modules above each have a corresponding section or directory-tree entry
 
-### Requirement: 測試契約 — 覆蓋層級與 mock 策略
+### Requirement: Testing contract — coverage levels and mock strategy
 
-`tests/` SHALL 存在且 `pytest` 全綠，覆蓋三個層級，全程零 Bedrock 呼叫（零花費）：
+`tests/` SHALL exist and `pytest` SHALL be all green, covering three levels, with zero Bedrock calls (zero cost) throughout:
 
-1. **e2e（HTTP→service→repo→DB）**：mock mode（`ANALYZER_MOCK_MODE=true`）下走完整 pipeline 與 evaluation 流程 + 404 負路徑。DB 用 docker-compose dev Postgres。
-2. **ETL 單元（純函式）**：`promo_forecast_service` deterministic 函式與 `evaluation_service._build_inputs`，無 DB、無網路 —— 守住「ETL First, LLM Last」的演算法聚合層。
-3. **chain 組裝（fake LLM 注入）**：`build_recommendation_chain` / `build_judge_chain` 以 fake chat model 注入，驗 prompt 變數與輸出型別 contract。
+1. **e2e (HTTP→service→repo→DB)**: run the full pipeline and evaluation flows + the 404 failure path under mock mode (`ANALYZER_MOCK_MODE=true`). The DB uses the docker-compose dev Postgres.
+2. **ETL units (pure functions)**: the deterministic functions of `promo_forecast_service` and `evaluation_service._build_inputs`, with no DB and no network — guarding the algorithmic aggregation layer of "ETL First, LLM Last".
+3. **chain assembly (fake LLM injection)**: `build_recommendation_chain` / `build_judge_chain` injected with a fake chat model, verifying the prompt-variable and output-type contract.
 
-#### Scenario: mock e2e 不打 Bedrock
-- **WHEN** `ANALYZER_MOCK_MODE=true` 下跑 e2e 測試
-- **THEN** pipeline 走到 `done`、evaluation 的 `judge_model_id == "mock"`，無任何 AWS Bedrock 網路呼叫
+#### Scenario: mock e2e does not call Bedrock
+- **WHEN** running the e2e tests under `ANALYZER_MOCK_MODE=true`
+- **THEN** the pipeline reaches `done`, the evaluation's `judge_model_id == "mock"`, and there are no AWS Bedrock network calls
 
-#### Scenario: 單元測試獨立於基礎設施
-- **WHEN** 在無 docker、無 AWS 憑證的環境單獨跑 `pytest tests/test_etl_units.py tests/test_chains.py`
-- **THEN** 全部通過
+#### Scenario: unit tests are independent of infrastructure
+- **WHEN** running `pytest tests/test_etl_units.py tests/test_chains.py` standalone in an environment with no docker and no AWS credentials
+- **THEN** all pass
 
-#### Scenario: 測試守住錯誤處理契約
-- **WHEN** e2e 負路徑測試以不存在的 id 打 read 端點
-- **THEN** 收到 404 + `{"detail": ...}`，證明 NotFoundError → 全域 handler 鏈路有效
+#### Scenario: tests guard the error-handling contract
+- **WHEN** the e2e failure-path tests hit the read endpoints with a nonexistent id
+- **THEN** they receive 404 + `{"detail": ...}`, proving the NotFoundError → global handler chain is effective

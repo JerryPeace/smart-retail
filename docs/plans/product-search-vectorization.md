@@ -1,198 +1,197 @@
-# Phase 3.0 — 電商商品語意 / Hybrid 搜尋 POC（本地 OpenSearch + Bedrock Titan v2）
+# Phase 3.0 — E-commerce Product Semantic / Hybrid Search POC (local OpenSearch + Bedrock Titan v2)
 
-> 狀態：✅ **Phase 1 已執行收案（2026-06-13）**——26,014 筆全載入 + 全向量化；驗證結論見下方「Phase 1 執行結果」。Phase 2（hybrid + search API）獲得實證支持，待規劃。
-> **定位：POC，不綁定上 prod。** 目標是「**本地端 + Bedrock API 驗證搜尋結果**」，實作**盡量照 AWS 最佳實踐**。因不綁 prod，OpenSearch 版本/engine 直接挑最佳實踐值，不受 prod 版本牽制。
-> 技術棧：本地 docker **OpenSearch 2.19.x（k-NN, faiss）** · Bedrock（Titan v2，boto3 直呼）· Python（opensearch-py）。
-
----
-
-## 1. 目標
-
-把本公司 26,018 筆商品目錄載入**本地 docker OpenSearch**，用 **Bedrock Titan v2** 向量化，**在本地驗證語意/Hybrid 搜尋的結果品質**。成功標準是「能證明語意搜尋找得到 BM25 找不到的商品」，而非單一 demo。
-
-**Phase 1 可交付成果**：
-- 本地 docker OpenSearch（k-NN/faiss 內建）跑起、有 healthcheck
-- 26k 筆原始資料載入（martId 當 `_id`，冪等可重跑）
-- 每筆商品 Titan v2 向量寫入 `knn_vector` 欄
-- **golden set 驗證**：一組真實查詢，向量 vs BM25 並排比較，證明語意搜尋價值
+> Status: ✅ **Phase 1 closed out (2026-06-13)** — all 26,014 records loaded + fully vectorized; verification conclusions in the "Phase 1 Execution Results" section below. Phase 2 (hybrid + search API) is now empirically supported and pending planning.
+> **Positioning: POC, not committed to prod.** The goal is to "**verify search result quality locally + via the Bedrock API**", with the implementation **following AWS best practices as closely as possible**. Since it is not bound to prod, the OpenSearch version/engine are chosen directly for best-practice value, unconstrained by the prod version.
+> Tech stack: local docker **OpenSearch 2.19.x (k-NN, faiss)** · Bedrock (Titan v2, called directly via boto3) · Python (opensearch-py).
 
 ---
 
-## 2. 背景與資料發現（已實際盤點來源檔）
+## 1. Goal
 
-來源檔：`OpenSearch_Full_20260612_030007.json`（36MB，單行 JSON array，繁中）。
-⚠️ 須先確認結構是 `_source` 物件陣列，還是含 `_index`/`_id` 的 search response（影響 P1-3 解析）。
+Load the company's 26,018-record product catalog into **local docker OpenSearch**, vectorize it with **Bedrock Titan v2**, and **verify the result quality of semantic / hybrid search locally**. The success criterion is "being able to prove that semantic search finds products BM25 cannot find", not a one-off demo.
 
-| 項目 | 發現 |
+**Phase 1 deliverables**:
+- Local docker OpenSearch (k-NN/faiss built in) running, with a healthcheck
+- 26k raw records loaded (martId as `_id`, idempotent and re-runnable)
+- A Titan v2 vector for each product written to the `knn_vector` field
+- **golden set verification**: a set of real queries, comparing vector vs BM25 side by side to prove the value of semantic search
+
+---
+
+## 2. Background and Data Discovery (source file already inventoried)
+
+Source file: `OpenSearch_Full_20260612_030007.json` (36MB, single-line JSON array, Traditional Chinese).
+⚠️ Must first confirm whether the structure is an array of `_source` objects, or a search response containing `_index`/`_id` (affects P1-3 parsing).
+
+| Item | Finding |
 |------|------|
-| **規模** | 26,018 筆 → 單節點本地輕鬆（向量約 106MB，遠低於 JVM circuit breaker） |
-| **可嵌入文字** | `martName`、`feature`、`keyword`（7% 空）、`categoryLevelXName`，文字欄 0% 空值 |
-| **語言** | 100% 繁體中文 → 影響 ① embedding 中文品質 ② BM25 中文分詞（見 P1-2 analyzer） |
-| **分類污染** | ⚠️ **≥363 筆**品牌旗艦館（葡萄王、台塑生醫、順天本草、sakuyo、MEGA KING、大葉高島屋）把品牌名塞進 `categoryLevel1`；`categoryLevel2` 出現「成分分類/熱銷活動」行銷標籤 |
-| **過濾** | `status` 全 2、`isSearchable=0` 有 4 筆（排除）、`channel` 全 1 |
+| **Scale** | 26,018 records → trivial for a single local node (vectors ~106MB, far below the JVM circuit breaker) |
+| **Embeddable text** | `martName`, `feature`, `keyword` (7% empty), `categoryLevelXName`; text fields 0% empty |
+| **Language** | 100% Traditional Chinese → affects ① embedding Chinese quality ② BM25 Chinese tokenization (see P1-2 analyzer) |
+| **Category pollution** | ⚠️ **≥363 records** are brand flagship stores (Grape King, FPG Biotech, Sun Ten, sakuyo, MEGA KING, Takashimaya) that stuff brand names into `categoryLevel1`; `categoryLevel2` contains marketing tags like "ingredient category / best-seller campaign" |
+| **Filtering** | `status` all 2, `isSearchable=0` has 4 records (excluded), `channel` all 1 |
 
-**POC 商業主張**：分類污染 → 靠 `category` 篩會漏商品（搜「保健」漏掉葡萄王靈芝王）。語意搜尋從 `martName`/`feature` 抓意義、不依賴髒分類 → 這正是 P1-5 要量化驗證的事。
-
----
-
-## 3. 前置條件
-
-- [ ] 動工前讀 `.claude/rules/coding-rules.md` 與 `.claude/rules/safety.md`
-- [x] **Bedrock Titan v2 已驗證**（2026-06-12）：profile `lab`（<REDACTED_ACCOUNT>, role <LAB_ROLE>）、region `ap-northeast-1`、`amazon.titan-embed-text-v2:0` 回 1024 維。boto3 須 `profile_name="lab"`。⚠️ lab 臨時憑證會過期 → `scripts/refresh-lab-creds.sh`
-- [ ] 加依賴：`uv add opensearch-py`（pyproject.toml 目前無）
-- [ ] 來源檔放入 `products/OpenSearch_Full_20260612_030007.json`（36MB，加 `.gitignore`）
+**POC business case**: category pollution → filtering by `category` misses products (searching "health supplements" misses Grape King's Reishi King). Semantic search captures meaning from `martName`/`feature` and does not rely on dirty categories → this is exactly what P1-5 sets out to quantify and verify.
 
 ---
 
-## 4. 設計決策（已釐清，含 Fable 審查修正）
+## 3. Prerequisites
 
-| # | 決策 | 理由 |
+- [ ] Before starting, read `.claude/rules/coding-rules.md` and `.claude/rules/safety.md`
+- [x] **Bedrock Titan v2 already verified** (2026-06-12): profile `lab` (<REDACTED_ACCOUNT>, role <LAB_ROLE>), region `ap-northeast-1`, `amazon.titan-embed-text-v2:0` returns 1024 dimensions. boto3 requires `profile_name="lab"`. ⚠️ lab temporary credentials expire → `scripts/refresh-lab-creds.sh`
+- [ ] Add dependency: `uv add opensearch-py` (not currently in pyproject.toml)
+- [ ] Place the source file at `products/OpenSearch_Full_20260612_030007.json` (36MB, add to `.gitignore`)
+
+---
+
+## 4. Design Decisions (clarified, including Fable review corrections)
+
+| # | Decision | Rationale |
 |---|------|------|
-| D1 | **OpenSearch 2.19.x** | 不綁 prod → 挑最佳實踐版本；2.19 有 faiss + RRF score-ranker，避開 3.x 粗糙邊角與 nmslib 棄用 |
-| D2 | **engine=faiss, space_type=innerproduct** | AWS 推薦 faiss；Titan `normalize:true` 下單位向量 innerproduct **等價 cosine**，且版本無關、面向未來（避開 nmslib） |
-| D3 | **embedding 模型 Titan v2 / 1024 維** | 使用者指定；中文 Cohere 比較留 Phase 2 |
-| D4 | **嵌入文字** = `martName`+`feature`+`keyword`+三層 categoryName（清洗後） | 文字欄品質好；category 含品牌名也是訊號，但行銷標籤是噪音（Phase 2 A/B） |
-| D5 | **`_id` = martId**（商品編號） | bulk 用 `index` action 天然冪等，重跑不翻倍、P1-4 續跑才有意義 |
-| D6 | **中文 analyzer**：`smartcn`（內建 plugin） | 預設 standard analyzer 把中文切單字，BM25 很差；smartcn 做中文斷詞（⚠️ kuromoji 是日文，不用） |
-| D7 | **embedding 用 boto3 自己嵌（方式 A）** | 本地最簡可控、貼合 ETL First；OpenSearch Bedrock connector（方式 B）不在 POC 範圍 |
-| D8 | **boto3 不用 LangChain** | embedding 是原子操作；LangChain 留 Phase 3「檢索→生成推薦理由」 |
+| D1 | **OpenSearch 2.19.x** | Not bound to prod → pick the best-practice version; 2.19 has faiss + RRF score-ranker, avoiding the rough edges of 3.x and the nmslib deprecation |
+| D2 | **engine=faiss, space_type=innerproduct** | AWS recommends faiss; with Titan `normalize:true` the unit vectors make innerproduct **equivalent to cosine**, and it is version-independent and future-proof (avoids nmslib) |
+| D3 | **embedding model Titan v2 / 1024 dims** | User-specified; Chinese Cohere comparison deferred to Phase 2 |
+| D4 | **embedding text** = `martName`+`feature`+`keyword`+three-level categoryName (after cleaning) | text field quality is good; category containing brand names is also signal, but marketing tags are noise (Phase 2 A/B) |
+| D5 | **`_id` = martId** (product number) | bulk with the `index` action is naturally idempotent; re-runs don't duplicate, and P1-4 resume only makes sense this way |
+| D6 | **Chinese analyzer**: `smartcn` (built-in plugin) | the default standard analyzer splits Chinese into single characters, making BM25 very poor; smartcn does Chinese word segmentation (⚠️ kuromoji is Japanese, don't use it) |
+| D7 | **embed with boto3 ourselves (approach A)** | simplest and most controllable locally, and fits ETL First; the OpenSearch Bedrock connector (approach B) is out of POC scope |
+| D8 | **boto3 instead of LangChain** | embedding is an atomic operation; LangChain is reserved for Phase 3 "retrieval → generating recommendation rationale" |
 
 ---
 
-## 5. 工作項目
+## 5. Work Items
 
-### Phase 1 — 載入本地 OpenSearch + Titan v2 向量化（本次焦點）
+### Phase 1 — Load local OpenSearch + Titan v2 vectorization (current focus)
 
-**P1-1 起本地 OpenSearch（docker）**
-- [ ] `docker-compose.dev.yml` 加 `opensearch` 服務：`opensearchproject/opensearch:2.19.x`，single-node、`DISABLE_SECURITY_PLUGIN=true`、`-Xms1g -Xmx1g`、memlock
-- [ ] 加 **healthcheck**（`curl -f localhost:9200/_cluster/health`，對齊專案既有服務慣例）
-- [ ] 裝 `smartcn` analyzer plugin（Dockerfile 或 init 裝 `analysis-smartcn`）
-- [ ]（可選）`opensearch-dashboards`（5601）；埠避開既有（postgres 5434）
-- [ ] 驗證：healthcheck green
+**P1-1 Start local OpenSearch (docker)**
+- [ ] Add an `opensearch` service to `docker-compose.dev.yml`: `opensearchproject/opensearch:2.19.x`, single-node, `DISABLE_SECURITY_PLUGIN=true`, `-Xms1g -Xmx1g`, memlock
+- [ ] Add a **healthcheck** (`curl -f localhost:9200/_cluster/health`, aligned with the project's existing service conventions)
+- [ ] Install the `smartcn` analyzer plugin (install `analysis-smartcn` via Dockerfile or init)
+- [ ] (optional) `opensearch-dashboards` (5601); pick a port that avoids existing ones (postgres 5434)
+- [ ] Verify: healthcheck green
 
-**P1-2 建 k-NN 索引**
-- [ ] 索引 `products_v1`：`settings.index.knn=true`、載入期 `refresh_interval=-1`、`number_of_replicas=0`
-- [ ] mapping：
-  - 文字欄用 **smartcn analyzer**：`martName`/`feature`/`keyword`（text, analyzer=smartcn）
-  - `categoryLevelXName`/`brand`（keyword）、`price`（float）、`isSearchable`（integer）
-  - `embedding`: `knn_vector`，`dimension=1024`，`method={engine:faiss, name:hnsw, space_type:innerproduct}`
+**P1-2 Build the k-NN index**
+- [ ] Index `products_v1`: `settings.index.knn=true`, `refresh_interval=-1` during load, `number_of_replicas=0`
+- [ ] mapping:
+  - text fields use the **smartcn analyzer**: `martName`/`feature`/`keyword` (text, analyzer=smartcn)
+  - `categoryLevelXName`/`brand` (keyword), `price` (float), `isSearchable` (integer)
+  - `embedding`: `knn_vector`, `dimension=1024`, `method={engine:faiss, name:hnsw, space_type:innerproduct}`
 
-**P1-3 載入原始資料（ETL First，純演算法）**
-- [ ] `scripts/etl/load_products_os.py` — 讀 JSON（先確認結構）→ 過濾 `isSearchable=1` → `opensearch-py` **bulk**（`_id=martId`，`index` action 冪等）
-- [ ] 載入後復原 `refresh_interval`/`replicas`，`GET products_v1/_count` ≈ 26,014
+**P1-3 Load raw data (ETL First, pure algorithm)**
+- [ ] `scripts/etl/load_products_os.py` — read JSON (confirm structure first) → filter `isSearchable=1` → `opensearch-py` **bulk** (`_id=martId`, `index` action is idempotent)
+- [ ] After loading, restore `refresh_interval`/`replicas`; `GET products_v1/_count` ≈ 26,014
 
-**P1-4 Titan v2 向量化（boto3，方式 A）**
+**P1-4 Titan v2 vectorization (boto3, approach A)**
 - [ ] `scripts/etl/embed_products_os.py` — `boto3.Session(profile_name="lab", region_name="ap-northeast-1")` → `invoke_model`
-  - **文字清洗**：strip HTML、`keyword` 空值用 `or ""`（避免串出 `"None"`）、truncate 至 Titan 上限內（8192 token / 50k 字元）
+  - **text cleaning**: strip HTML, use `or ""` for empty `keyword` (to avoid concatenating `"None"`), truncate to within Titan's limit (8192 tokens / 50k characters)
   - body `{"inputText": ..., "dimensions": 1024, "normalize": true}`
-  - **bulk update** 寫回 `embedding`；批次 **200~500 docs/批**
-  - 自寫 retry（exponential backoff，429/5xx）；可重跑（只補無 embedding 的 doc）
-  - **5~10 並發**（注意 Bedrock RPM quota）
-- [ ] ⏱️ 估時：序列約 **1~1.5 小時**；並發後縮短。**一次跑不完是預期行為**（lab 憑證會過期），靠續跑機制。Bedrock Batch Inference 為半價替代（POC 用 on-demand 合理，記錄此取捨）
-- [ ] 💰 成本：~390 萬 token × Titan v2 ≈ **< $0.1 一次性**
+  - **bulk update** writing back to `embedding`; batches of **200~500 docs/batch**
+  - hand-rolled retry (exponential backoff, 429/5xx); re-runnable (only fills docs without an embedding)
+  - **5~10 concurrency** (watch the Bedrock RPM quota)
+- [ ] ⏱️ Estimated time: serial ~**1~1.5 hours**; shorter with concurrency. **Not finishing in one run is expected behavior** (lab credentials expire), relying on the resume mechanism. Bedrock Batch Inference is a half-price alternative (on-demand is reasonable for a POC; record this trade-off)
+- [ ] 💰 Cost: ~3.9M tokens × Titan v2 ≈ **< $0.1 one-time**
 
-**P1-5 驗證搜尋結果（重點，golden set + BM25 對照）**
-- [ ] 建 **golden set**：10~20 條真實查詢，標註預期命中商品，分兩類：
-  - **詞面重疊**（BM25 也該行）：如「靈芝保健飲」→ 葡萄王靈芝王
-  - **詞面不重疊**（BM25 應失敗、向量應成功）：如「增強免疫力的飲料」「送長輩的養生禮盒」「冬天露營手指冰冷」→ 對應靈芝/養生/暖手套商品
-- [ ] 每條查詢：先 boto3 嵌入 query → 跑 **k-NN query**，**並排跑 BM25 `match` 對照組**，比 top-10
-- [ ] **成功標準**：詞面不重疊查詢中，「向量找到、BM25 找不到」的案例 ≥ N 個（量化證明語意價值）
-- [ ] **分類污染示範**：對「保健食品」做 category filter（漏掉葡萄王，因其 category=品牌名）vs 向量搜尋（找到）→ 證明繞過髒分類
-- [ ] 查詢端嵌入用同一 Titan v2（保證 query/doc 同模型同維度）
-- [ ] golden set 存檔，Phase 2 模型 benchmark 直接複用
+**P1-5 Verify search results (key item, golden set + BM25 comparison)**
+- [ ] Build a **golden set**: 10~20 real queries, annotated with expected matching products, in two categories:
+  - **lexical overlap** (BM25 should also work): e.g. "Reishi health drink" → Grape King Reishi King
+  - **no lexical overlap** (BM25 should fail, vector should succeed): e.g. "a drink that boosts immunity", "a wellness gift box for elders", "cold fingers when camping in winter" → corresponding Reishi/wellness/hand-warmer products
+- [ ] For each query: first embed the query via boto3 → run a **k-NN query**, **run a BM25 `match` control side by side**, compare top-10
+- [ ] **Success criterion**: among the no-lexical-overlap queries, the count of cases where "vector finds it, BM25 doesn't" is ≥ N (quantitative proof of semantic value)
+- [ ] **Category pollution demo**: apply a category filter for "health supplements" (misses Grape King because its category=brand name) vs vector search (finds it) → prove it bypasses dirty categories
+- [ ] Query-side embedding uses the same Titan v2 (guaranteeing query/doc share the same model and dimensions)
+- [ ] Save the golden set; Phase 2 model benchmarks reuse it directly
 
-### Phase 1 執行結果（2026-06-13 收案）
+### Phase 1 Execution Results (closed out 2026-06-13)
 
-**資料平面全數完成**：26,018 筆 → 過濾 4 筆 isSearchable=0 → **26,014 筆載入 + 100% Titan v2 向量化**（1024 維）。冪等已驗（重跑 _count 不變）；續跑機制經真實 crash 實證（OpenSearch bulk ConnectionTimeout 中斷後，增量 flush 保住 22,200 筆、重跑只補 3,814）。Bedrock 實際花費 < $0.15（嵌入 + LLM-judge）。
+**Data plane fully complete**: 26,018 records → filtered out 4 with isSearchable=0 → **26,014 loaded + 100% Titan v2 vectorized** (1024 dims). Idempotency verified (re-run _count unchanged); the resume mechanism was proven by a real crash (after an OpenSearch bulk ConnectionTimeout interruption, incremental flush preserved 22,200 records and the re-run only filled the remaining 3,814). Actual Bedrock cost < $0.15 (embedding + LLM-judge).
 
-**驗證結論（三輪量尺，皆如實未調寬）**：
-- 第一輪「精確 expected_mart_id 命中」：vector-only wins 0/8 ❌——**診斷為量尺問題**：多 SKU 變體 + 通用 query 下，猜死的標準答案 ID 冤枉了向量（向量回了語意正確但非指定 ID 的商品）。報告 `out/search_eval_20260613.md`。
-- 第二輪「LLM-judge 相關性」（**Haiku** 評 271 個 query×商品對）：向量勝 **2/8**（N=3 未達 ❌）、平手 3、BM25 勝 3。報告 `out/search_eval_judge_20260613.md`。
-- 第三輪「LLM-judge 相關性」（**Opus 4.8** 同 271 對重評）：向量勝 **5/8（N=3 達標 ✅）**、平手 1、BM25 勝 2。報告 `out/search_eval_judge_20260613-opus.md`。
+**Verification conclusions (three rounds of measurement, none loosened)**:
+- Round one "exact expected_mart_id hit": vector-only wins 0/8 ❌ — **diagnosed as a measurement problem**: with multiple SKU variants + generic queries, hard-coded gold-standard answer IDs unfairly penalized the vector (the vector returned products that were semantically correct but not the specified ID). Report `out/search_eval_20260613.md`.
+- Round two "LLM-judge relevance" (**Haiku** judging 271 query×product pairs): vector wins **2/8** (N=3 not reached ❌), 3 ties, BM25 wins 3. Report `out/search_eval_judge_20260613.md`.
+- Round three "LLM-judge relevance" (**Opus 4.8** re-judging the same 271 pairs): vector wins **5/8 (N=3 reached ✅)**, 1 tie, BM25 wins 2. Report `out/search_eval_judge_20260613-opus.md`.
 
-**兩個 judge 判定翻轉的機制（可解釋、非裁判購物）**：Opus 整體更嚴格（non_overlap 平均相關數 vec 4.25→3.00、bm25 4.62→**2.12**）——砍最多的是 BM25 靠部分詞面匹配撈到的商品（q08「增強免疫力」：Haiku 認 BM25 10/10 相關、Opus 只認 3/10 真能滿足需求）。**嚴格的「真能滿足需求」標準下，向量的語意匹配存活率高於 BM25 的詞面匹配**。兩 judge 在向量短板上完全一致（q04 ThinkPad 均 0:10），且 q11/q13/q14 判定方向一致，顯示 Opus 並非偏袒向量。**最終採信較強 judge（Opus 4.8）：POC 成功標準達成**；Haiku 結果保留作為 judge 校準參考（Phase 2 benchmark 建議直接用 Opus 級 judge）。
+**The mechanism behind the two judges' flipped verdicts (explainable, not judge shopping)**: Opus is stricter overall (non_overlap mean relevant count vec 4.25→3.00, bm25 4.62→**2.12**) — what it cut most were the products BM25 dredged up via partial lexical matching (q08 "boost immunity": Haiku rated BM25 10/10 relevant, Opus only 3/10 as genuinely meeting the need). **Under the strict "genuinely meets the need" standard, the survival rate of the vector's semantic matches is higher than BM25's lexical matches**. The two judges fully agree on the vector's weak spots (q04 ThinkPad both 0:10), and q11/q13/q14 verdicts align directionally, showing Opus is not biased toward the vector. **The final verdict trusts the stronger judge (Opus 4.8): the POC success criterion is met**; the Haiku results are kept as a judge calibration reference (for Phase 2 benchmarks, recommend using an Opus-class judge directly).
 
-**數據給出比原命題更有行動價值的地圖**：
-1. **向量強項實證——情境/症狀式 query**：「冬天戶外手腳冰冷」vec 4:0、「頭髮掉太多想變茂密」vec 7:2。零詞面重疊的身體狀態描述，BM25 全滅、向量有效。
-2. **BM25+smartcn 比假設強**：通用健康 query（「增強免疫力的保健飲品」）經 smartcn 切詞後部分匹配（保健/飲品），在商品文案密集的語料命中大量相關品——「BM25 應失敗」的前提在語料層面不成立。
-3. **互補實證 → hybrid 是正解**：全局 vec_only_rel vs bm25_only_rel——Haiku judge **57 vs 73**、Opus judge **41 vs 52**，兩個 judge 方向一致：兩方法各自找到對方漏掉的數十筆相關商品。**這是 Phase 2 hybrid RRF 的直接實證依據**。
-4. **向量已知短板**：品牌/型號式 query（「ThinkPad 筆電」vec 1:10）——嵌入被規格/類別文字稀釋，hybrid 中 BM25 不可少的原因。
+**The data yields a more actionable map than the original thesis**:
+1. **Vector's strength proven — scenario/symptom-style queries**: "cold hands and feet outdoors in winter" vec 4:0, "hair falling out, want it fuller" vec 7:2. For body-state descriptions with zero lexical overlap, BM25 is wiped out while the vector works.
+2. **BM25+smartcn is stronger than assumed**: a generic health query ("an immunity-boosting health drink") after smartcn segmentation partially matches (health/drink), and in a corpus dense with product copy it hits many relevant items — the premise that "BM25 should fail" does not hold at the corpus level.
+3. **Complementarity proven → hybrid is the right answer**: global vec_only_rel vs bm25_only_rel — Haiku judge **57 vs 73**, Opus judge **41 vs 52**; both judges agree directionally: each method finds dozens of relevant products the other misses. **This is the direct empirical basis for Phase 2 hybrid RRF.**
+4. **Vector's known weak spot**: brand/model-style queries ("ThinkPad laptop" vec 1:10) — the embedding is diluted by spec/category text; this is why BM25 is indispensable in hybrid.
 
-**營運注意事項**：`load_products_os.py` 用 `index` action 全量覆寫——**重跑 load 會清空全部 embedding**，需 embed 續跑補齊（全量 ~$0.1/20 分）。golden set（15 條，`scripts/etl/golden_set_product_search.yaml`，status=approved）與 LLM-judge 腳本（`judge_search_relevance.py`）留作 Phase 2 模型 benchmark 與 API 準確度測試的固定量尺。
+**Operational notes**: `load_products_os.py` uses the `index` action for a full overwrite — **re-running load wipes all embeddings**, requiring an embed resume to backfill (full run ~$0.1/20 min). The golden set (15 entries, `scripts/etl/golden_set_product_search.yaml`, status=approved) and the LLM-judge script (`judge_search_relevance.py`) are kept as a fixed measurement standard for Phase 2 model benchmarks and API accuracy testing.
 
-### Phase 2 — ✅ 已規格化並實作為 `openspec/changes/product-search-hybrid-api`（2026-06-13）——hybrid search API（BM25+k-NN 應用端 RRF）+ `src/recommender/search/` 領域模組已上線
+### Phase 2 — ✅ Specced and implemented as `openspec/changes/product-search-hybrid-api` (2026-06-13) — hybrid search API (BM25+k-NN application-side RRF) + the `src/recommender/search/` domain module are live
 
-> **實作摘要**：`GET /search?q=&size=` endpoint 上線；query 端 Titan v2 embedding（含 mock 路徑）；應用端 Python RRF（k=60）；async OpenSearch client（lifespan 管理）；DI 仍集中 `deps.py`。詳見 openspec design：`openspec/changes/product-search-hybrid-api/design.md`。工程面 132 測試綠、code review 修 2 個靜默 bug（category 欄位名、price=0 抹除）。
+> **Implementation summary**: the `GET /search?q=&size=` endpoint is live; query-side Titan v2 embedding (with a mock path); application-side Python RRF (k=60); async OpenSearch client (managed via lifespan); DI still centralized in `deps.py`. See the openspec design: `openspec/changes/product-search-hybrid-api/design.md`. On the engineering side, 132 tests green, code review fixed 2 silent bugs (category field name, price=0 being erased).
 
-> **✅ 準確度評估最終結果（2026-06-13，Opus judge 277 對，端到端活測，如實未調寬）——hybrid 達標、贏過單一方法**：
-> 採 **min-max score fusion（w_bm25=0.7）** 後，prod `/search` 活測 **hybrid 全局相關數 79 > BM25-only 76 > k-NN-only 65**；成功標準 (a) 全局 hybrid≥max **✅**、(b) 互補保留（q04=10/q11=1/q13=1 均不歸零）**✅**。報告 `out/search_eval_hybrid_20260613-fixed.md`。
+> **✅ Accuracy evaluation final result (2026-06-13, Opus judge, 277 pairs, end-to-end live test, not loosened) — hybrid meets the criterion and beats single methods**: with **min-max score fusion (w_bm25=0.7)**, the prod `/search` live test shows **hybrid global relevant count 79 > BM25-only 76 > k-NN-only 65**; success criteria (a) global hybrid≥max **✅**, (b) complementarity preserved (q04=10/q11=1/q13=1 none drop to zero) **✅**. Report `out/search_eval_hybrid_20260613-fixed.md`.
 >
-> **達標前的兩個轉折（誠實紀錄）**：
-> - 初版 **naive 等權 RRF**（k=60）：hybrid **71**（修 artifact 前報告印 69），夾在 knn(65)/bm25(76) 之間、兩項全 fail。
-> - Fable 根因調查**推翻「k 太大」假設**（k-sweep 1~100 全平坦 71-72），定論真因是**等權融合**——換 min-max 加權 BM25 後翻盤。
-> - min-max 首次活測 75（仍差 1）：落差**全來自 eval harness 的 source_map artifact**（hybrid 深位 doc 商品資訊空白 → judge 誤判 ✗，低估約 −4）；修 harness（三路聯集 + mget 補全 source）後重判得**真實值 79**。
-> **根因（2026-06-13 Fable 數據調查定論，腳本 `scripts/etl/investigate_hybrid_fusion.py`、報告 `out/hybrid_fusion_investigation_20260613.md`）——真因是「未加權融合」，非「k 太大」**：
-> 初判「RRF k=60 太大」**已被數據推翻**——k-sweep（k=1/5/10/20/30/60/100）全局 rel@10 全平坦 72/72/71/71/71/71/71，調 k 與調候選池皆無效。真因是**等權融合**：等權下單路 doc 的 RRF 分對 rank 單調遞減、與 k 無關，兩路不重疊時無論 k 都是 1:1 輪流，k-NN(弱,65) 噪音以等價地位稀釋 BM25(強,76) 的 gold。q11 的 bm25 r7 gold 在任何 k 下都贏不了 knn r1–r6 噪音（`1/(k+7)<1/(k+6)`，數學注定）。
-> 另：報告原值 69 含一個 eval artifact（source_map 只蓋兩路 top-10，hybrid 深位 doc 資訊空白被誤判 ✗，q05 被誤報為病灶）——**修正後現行 prod 實為 71**。
-> **融合策略實測（全局 rel@10，bm25=76 為標竿）**：min-max score fusion w_bm25=0.7 → **79（唯一同時過成功標準 a+b）**；weighted RRF w_bm25=0.7 → 78（q13 歸零 fail b）；等權 RRF（任何 k）71；oracle per-query 路由上界 88。
+> **Two turning points before meeting the criterion (honest record)**:
+> - Initial **naive equal-weight RRF** (k=60): hybrid **71** (the pre-artifact-fix report printed 69), wedged between knn(65)/bm25(76), failing both.
+> - Fable's root-cause investigation **overturned the "k too large" hypothesis** (a k-sweep of 1~100 was flat at 71-72); the conclusion is the real cause was **equal-weight fusion** — switching to min-max weighted BM25 flipped it.
+> - First min-max live test was 75 (still off by 1): the gap **came entirely from the eval harness's source_map artifact** (hybrid deep-position doc product info blank → judge mistakenly marked ✗, underestimating by ~−4); after fixing the harness (three-way union + mget to backfill source), re-judging gave the **true value 79**.
+> **Root cause (Fable's 2026-06-13 data investigation conclusion, script `scripts/etl/investigate_hybrid_fusion.py`, report `out/hybrid_fusion_investigation_20260613.md`) — the real cause is "unweighted fusion", not "k too large"**:
+> the initial "RRF k=60 too large" verdict **was overturned by the data** — the k-sweep (k=1/5/10/20/30/60/100) global rel@10 was flat at 72/72/71/71/71/71/71; tuning k and tuning the candidate pool were both ineffective. The real cause is **equal-weight fusion**: under equal weights a single-path doc's RRF score decreases monotonically with rank and is independent of k; when the two paths don't overlap, regardless of k they alternate 1:1, and k-NN (weak, 65) noise dilutes BM25 (strong, 76) gold on equal footing. q11's bm25 r7 gold can never beat the knn r1–r6 noise at any k (`1/(k+7)<1/(k+6)`, mathematically guaranteed).
+> Also: the report's original value of 69 contained an eval artifact (source_map only covered the two paths' top-10; hybrid deep-position doc info was blank and mistakenly marked ✗, q05 was misreported as the culprit) — **after correction the current prod is actually 71**.
+> **Fusion strategy measurements (global rel@10, bm25=76 as the benchmark)**: min-max score fusion w_bm25=0.7 → **79 (the only one to pass both success criteria a+b)**; weighted RRF w_bm25=0.7 → 78 (q13 drops to zero, fails b); equal-weight RRF (any k) 71; oracle per-query routing upper bound 88.
 
-### Phase 2 現況（已完成）— min-max fusion 達標、已上 prod
-- **已實作上 prod**：`src/recommender/search/` 改用 **min-max score fusion**（`search_bm25_weight=0.7`、`search_candidate_multiplier=2`，皆可由 Settings 調），`reciprocal_rank_fusion` 保留於 `fusion.py` 不刪。
-- **已修 eval harness artifact**：`judge_hybrid_search.py` 的 `source_map` 改三路聯集 + `mget` 補全，消除「深位 doc 商品資訊空白被 judge 誤判 ✗」的低估（這就是 75→79 的 4 分差）。
-- **端到端活測達標**：prod `/search` + Opus judge 277 對 → hybrid **79 > bm25 76 > knn 65**，(a)(b) 雙過。報告 `out/search_eval_hybrid_20260613-fixed.md`。
-- **測試**：全套 141 passed、零 migration。
+### Phase 2 Current State (complete) — min-max fusion meets the criterion, shipped to prod
+- **Implemented and shipped to prod**: `src/recommender/search/` switched to **min-max score fusion** (`search_bm25_weight=0.7`, `search_candidate_multiplier=2`, both tunable via Settings); `reciprocal_rank_fusion` is kept in `fusion.py`, not deleted.
+- **Eval harness artifact fixed**: `judge_hybrid_search.py`'s `source_map` switched to a three-way union + `mget` backfill, eliminating the "deep-position doc product info blank being mistakenly judged ✗" underestimate (this is the 4-point 75→79 difference).
+- **End-to-end live test meets the criterion**: prod `/search` + Opus judge 277 pairs → hybrid **79 > bm25 76 > knn 65**, both (a)(b) pass. Report `out/search_eval_hybrid_20260613-fixed.md`.
+- **Tests**: full suite 141 passed, zero migrations.
 
-### Phase 2c-1 地基 — ✅ 已執行收案（2026-06-13）：擴 golden set 50 條 + 統計重驗
-> 📌 **完整決策紀錄見 [`docs/plans/search-tuning-decision-record-20260613.md`](./search-tuning-decision-record-20260613.md)**——當天試了 4 種優化（調 w / 繁→簡分詞 / bigram / 軟 tag）全落雜訊帶或變差，**保留 v1**；功能導向 labeling 列為「待真實 query 分佈再評估」的聚焦未來方案。
-> **結論（報告 `out/phase2c1_groundwork_20260613.md`，全程誠實未調寬）——達標降級、w=0.7 證實 overfit、真 headroom 在 routing**：
-> - golden set 擴 **15→50 條**（20 lexical + 30 non_overlap，跨 5 大類別矯正 v1 過度集中保健 1.6% 尾類的取樣偏差；11 條打分類污染）。全部 mart_id jq 核實、non_overlap grep 核實詞面（含橋接詞）不重疊；使用者審核 approved。`scripts/etl/golden_set_product_search.yaml`（v2）。
-> - **發現 1：達標統計不顯著**。50 條端到端（Opus 4.8 judge 919 對）：hybrid **228** / bm25 224 / knn 214。配對 bootstrap（B=10000）hybrid−bm25 margin **+4，95% CI [−10,+18]，P=69%**——**跨 0**。Phase 2「79>76 達標」落在雜訊內，應降級為「hybrid **不劣於** BM25 + 互補保留」。腳本 `bootstrap_hybrid_margin.py`、報告 `out/phase2c1_bootstrap_20260613.md`。
-> - **發現 2：w_bm25=0.7 是 15 條 overfit**。w-sweep（`wsweep_50q.py`）在 50 條上 w=0.5→235、0.6→234 **都贏過 prod 的 0.7→228**，趨勢是「多給向量權重越好」；0.7 非峰值、不泛化。但 223–235 全在雜訊帶內 → 不能反稱 0.5 顯著更好。報告 `out/phase2c1_wsweep_50q_20260613.md`。
-> - **發現 3：真 headroom 在 per-query routing**。50 條三路免費算出 oracle（逐 query 選 knn/bm25 較佳者）=**270**，比 hybrid 228 多 **+42 doc（+18%）**；靜態融合稀釋掉 47 個單一法勝場（最慘 q18：knn 10/bm25 0/hybrid 1）。
-> - **行動**：① 放棄全局 w-tuning 破 80（優化雜訊）；② prod w_bm25 若要改方向是 0.5–0.6 但須 train/test 學非手掃；③ 提分投 per-query routing（oracle 270），但須 k-fold / 再擴量尺避免重蹈 overfit。golden set v2 已是經統計檢定的可信固定量尺。
+### Phase 2c-1 Groundwork — ✅ Closed out (2026-06-13): expanded golden set to 50 entries + statistical re-verification
+> 📌 **Full decision record at [`docs/plans/search-tuning-decision-record-20260613.md`](./search-tuning-decision-record-20260613.md)** — that day we tried 4 optimizations (tuning w / Traditional→Simplified tokenization / bigram / soft tag), all of which landed in the noise band or got worse, so we **kept v1**; function-oriented labeling is listed as a focused future option "pending real query distribution before re-evaluating".
+> **Conclusion (report `out/phase2c1_groundwork_20260613.md`, honest throughout, not loosened) — criterion downgraded, w=0.7 confirmed overfit, the real headroom is in routing**:
+> - golden set expanded **15→50 entries** (20 lexical + 30 non_overlap, spanning 5 major categories to correct v1's sampling bias of over-concentrating on the 1.6%-tail health category; 11 entries hit category pollution). All mart_ids jq-verified, non_overlap grep-verified for non-overlapping lexical surface (including bridging words); user-reviewed and approved. `scripts/etl/golden_set_product_search.yaml` (v2).
+> - **Finding 1: meeting the criterion is not statistically significant**. 50-entry end-to-end (Opus 4.8 judge, 919 pairs): hybrid **228** / bm25 224 / knn 214. Paired bootstrap (B=10000) hybrid−bm25 margin **+4, 95% CI [−10,+18], P=69%** — **crosses 0**. Phase 2's "79>76 meets criterion" falls within the noise and should be downgraded to "hybrid is **not inferior to** BM25 + complementarity preserved". Script `bootstrap_hybrid_margin.py`, report `out/phase2c1_bootstrap_20260613.md`.
+> - **Finding 2: w_bm25=0.7 is overfit to the 15 entries**. The w-sweep (`wsweep_50q.py`) on 50 entries shows w=0.5→235, 0.6→234 **both beat prod's 0.7→228**, with a trend of "the more weight given to the vector the better"; 0.7 is not the peak and does not generalize. But 223–235 are all within the noise band → one cannot claim 0.5 is significantly better either. Report `out/phase2c1_wsweep_50q_20260613.md`.
+> - **Finding 3: the real headroom is in per-query routing**. The 50 entries let us freely compute an oracle across the three paths (per query, pick the better of knn/bm25) = **270**, **+42 docs (+18%)** more than hybrid 228; static fusion dilutes away 47 single-method wins (worst case q18: knn 10/bm25 0/hybrid 1).
+> - **Actions**: ① abandon global w-tuning to break 80 (optimizing noise); ② if prod w_bm25 is to change, the direction is 0.5–0.6, but it must be learned via train/test, not hand-swept; ③ invest scoring gains in per-query routing (oracle 270), but with k-fold / further measurement-set expansion to avoid repeating the overfit. golden set v2 is now a statistically tested, trustworthy fixed measurement standard.
 
-### Phase 2c — 進一步提分計劃（⚠️ 已被 2c-1 數據修正：放棄破 80，改投 routing）
-> ⚠️ **2c-1 實證更新**：原「純融合調參到 ~79」的天花板假設已被推翻為**「靜態融合整段（214–235）都在統計雜訊內、與 bm25 無顯著差異」**。破 80 不是天花板問題而是**雜訊問題**——再調 w 是優化雜訊。下列項目 1 已完成；提分重心移到項目 2（routing）。
+### Phase 2c — Further scoring-improvement plan (⚠️ already corrected by 2c-1 data: abandon breaking 80, pivot to routing)
+> ⚠️ **2c-1 empirical update**: the original "pure fusion ceiling at ~79" assumption has been overturned to **"the entire static-fusion range (214–235) is within statistical noise, with no significant difference from bm25"**. Breaking 80 is not a ceiling problem but a **noise problem** — tuning w further is optimizing noise. Item 1 below is done; the scoring-improvement focus moves to item 2 (routing).
 
-依「可信增益 / 成本 / 過擬合風險」排序：
-1. ✅ **【地基，已完成】擴 golden set 至 50 條 + bootstrap**：見上方 Phase 2c-1 收案。結論：達標降級、w=0.7 overfit、量尺已可信。
-2. **【最大 headroom，提分重心】per-query 自適應融合 / 路由**（詞面強 query→偏 BM25、情境式→偏 dense）：**2c-1 在 50 條實測 oracle（逐 query 選較佳單一法）=270 vs hybrid 228，+42 doc（+18%）空間**（取代舊的 15 條 oracle 88）。⚠️ raw BM25 分數**不是**可靠路由訊號（q10/q13/q14 分高卻 0 相關）→ 需真 query 分類器（輕量訊號：query 長度、精確詞命中率、BM25 分數 entropy；或小型 LTR）。⚠️ 須 k-fold / 再擴量尺，否則在 50 條上重蹈 w=0.7 的 overfit。成本中-高、過擬合風險中。
-3. **【避過擬合】learned fusion weights**（logistic regression / 小型 learning-to-rank 在標註上學權重，取代手調 w_bm25）：把「掃出 0.7」換成「學出來」，降過擬合。成本中。
-4. **【換 embedding】Cohere Multilingual vs Titan v2 benchmark**（Phase 1 D3 預留）：需全量重嵌 26k（~$0.1/20 分）；中文 dense 品質若更好可整體抬升，增益未知。成本中。
-   - 📌 **升級選項：統一多表徵模型（BGE-M3 類，一次推論得 dense+learned-sparse，消解 query 分類器）**——詳見 [`search-tuning-decision-record-20260613.md`](./search-tuning-decision-record-20260613.md) §11。屬下一代架構級投入，須排在「擴真實量尺」之後。
-5. **【高增益高成本】LLM re-rank 融合後 top-20**：每次搜尋多一次 LLM 呼叫、改架構；增益可能大但延遲/成本高，留最後。
+Ordered by "credible gain / cost / overfit risk":
+1. ✅ **[Groundwork, done] expand golden set to 50 entries + bootstrap**: see Phase 2c-1 closeout above. Conclusion: criterion downgraded, w=0.7 overfit, measurement standard now trustworthy.
+2. **[Largest headroom, scoring focus] per-query adaptive fusion / routing** (lexically strong query→lean BM25, scenario-style→lean dense): **2c-1 measured oracle (per query, pick the better single method) = 270 vs hybrid 228 on 50 entries, +42 docs (+18%) of room** (replacing the old 15-entry oracle of 88). ⚠️ raw BM25 score is **not** a reliable routing signal (q10/q13/q14 score high but are 0-relevant) → a real query classifier is needed (lightweight signals: query length, exact-term hit rate, BM25 score entropy; or a small LTR). ⚠️ must use k-fold / further measurement-set expansion, otherwise it repeats w=0.7's overfit on 50 entries. Medium-high cost, medium overfit risk.
+3. **[Avoid overfit] learned fusion weights** (logistic regression / a small learning-to-rank learns the weights on the annotations, replacing the hand-tuned w_bm25): turn "sweep out 0.7" into "learn it", reducing overfit. Medium cost.
+4. **[Swap embedding] Cohere Multilingual vs Titan v2 benchmark** (reserved in Phase 1 D3): requires fully re-embedding the 26k (~$0.1/20 min); if Chinese dense quality is better it could lift everything, gain unknown. Medium cost.
+   - 📌 **Upgrade option: a unified multi-representation model (BGE-M3 class, one inference yields dense+learned-sparse, dissolving the query classifier)** — see [`search-tuning-decision-record-20260613.md`](./search-tuning-decision-record-20260613.md) §11. This is a next-generation, architecture-level investment and must be sequenced after "expand the real measurement set".
+5. **[High gain, high cost] LLM re-rank of the post-fusion top-20**: one extra LLM call per search and an architecture change; the gain may be large but latency/cost are high, leave for last.
 
-**研究待續**：原本要用 Fable 查 GitHub/HuggingFace/論文的 hybrid 融合調參經驗（convex combination 正規化選擇、weighted RRF 標準做法、小樣本避過擬合、OpenSearch/Weaviate/Vespa/LlamaIndex 預設與調參建議）—— Fable subagent 暫時取用不到中斷，下次續查。
+**Research to continue**: we originally intended to use Fable to look up hybrid-fusion tuning experience on GitHub/HuggingFace/papers (convex combination normalization choices, standard practice for weighted RRF, avoiding overfit on small samples, default and tuning recommendations from OpenSearch/Weaviate/Vespa/LlamaIndex) — the Fable subagent was temporarily unavailable and interrupted; continue next time.
 
-（以下為原勾勒內容，保留設計脈絡）
-- Hybrid：BM25 + k-NN，融合用 **score-ranker-processor（RRF，2.19+）** 或 normalization-processor
-  - ⚠️ 修正：2.17 無內建 RRF；本 POC 用 2.19 故 RRF 可用
-- **領域模組 `src/recommender/search/`**（self-contained bounded context，非散進現有層優先資料夾）：`search/repository.py`（OpenSearch client + k-NN/BM25 DSL）→ `search/service.py`（hybrid 融合編排）→ `search/router.py`（`/search` endpoint）。理由：search 的基礎設施（OpenSearch）與核心 Postgres+Bedrock 不同，圈成獨立模組才能解耦、易抽換/獨立部署——這是 codebase 第一個 infra 斷層 domain，值得起頭採領域模組（屆時補一條設計決策）。P1-5 verify 腳本的查詢函式（embed query / k-NN / BM25）寫成可重用 importable 形式，Phase 2 直接 lift 進 `search/service.py` 不重寫。
-- **golden set 是兩平面的共同契約**：Part A（ETL 載入正確性）與 Part B（搜尋準確度）共用同一把量尺；P1 產出的 `golden_set_product_search.yaml` 直接當 Phase 2 search API 的準確度測試 fixture。
-- `category`/`stock` 當軟訊號降權；中文模型 benchmark（Titan vs Cohere Multilingual，用 golden set 測 recall@10）
+(The following is the original outline, preserved for design context.)
+- Hybrid: BM25 + k-NN, fusion via **score-ranker-processor (RRF, 2.19+)** or normalization-processor
+  - ⚠️ Correction: 2.17 has no built-in RRF; this POC uses 2.19 so RRF is available
+- **Domain module `src/recommender/search/`** (self-contained bounded context, not scattered into the existing layer-first folders): `search/repository.py` (OpenSearch client + k-NN/BM25 DSL) → `search/service.py` (hybrid fusion orchestration) → `search/router.py` (`/search` endpoint). Rationale: search's infrastructure (OpenSearch) differs from the core Postgres+Bedrock, so isolating it into an independent module enables decoupling, easy swap-out / independent deployment — this is the codebase's first infra-boundary domain, worth starting off as a domain module (a design decision will be added at that point). The query functions in the P1-5 verify script (embed query / k-NN / BM25) are written as reusable importable forms, so Phase 2 lifts them straight into `search/service.py` without rewriting.
+- **The golden set is the shared contract of both planes**: Part A (ETL load correctness) and Part B (search accuracy) share the same measurement standard; the `golden_set_product_search.yaml` produced in P1 serves directly as the accuracy test fixture for the Phase 2 search API.
+- `category`/`stock` as down-weighted soft signals; Chinese model benchmark (Titan vs Cohere Multilingual, measure recall@10 with the golden set)
 
-### Phase 3 —（勾勒）FM 清洗分類污染
-- 既有 `chains/` + Bedrock，把 363 筆品牌館商品從 `martName`/`feature` 重新分類
-
----
-
-## 6. 不做的事（POC 範圍外）
-
-- ❌ 不上 prod、不複製 prod 的 RDS→event→OpenSearch 同步（POC 不綁 prod；JSON 直接載入本地 OpenSearch）
-- ❌ 不用 pgvector（既然要練 OpenSearch 生態，直接用 OpenSearch）
-- ❌ 不用 Bedrock KB（RAG 文件問答，非商品排序搜尋，錯抽象）
-- ❌ 不用 OpenSearch Bedrock connector（方式 B；本地設定重，POC 用方式 A）
-- ❌ 不做 hybrid 融合 / API endpoint（Phase 2）；不修分類污染（Phase 3）
-- ❌ 不預先囤備用向量、不做多模型比較（Phase 1 單 Titan v2）
+### Phase 3 — (outline) FM cleaning of category pollution
+- Use the existing `chains/` + Bedrock to re-classify the 363 brand-store products from `martName`/`feature`
 
 ---
 
-## 7. 風險與備註
+## 6. Out of Scope (outside POC)
 
-- **Titan v2 區域可用性**：已驗證 ap-northeast-1 可用
-- **OpenSearch 記憶體**：JVM 1~2GB；Linux 主機 `vm.max_map_count=262144`（Docker Desktop Mac 內建）
-- **本地關 security**：`DISABLE_SECURITY_PLUGIN=true` 僅限本地 POC
-- **k-NN 索引特性**：`index.knn` 不能熱改既有索引 → 改 mapping/加向量要 reindex + alias
-- **中文 BM25**：必裝 smartcn，否則 hybrid 的關鍵字半邊地基不穩（Phase 2 才完整用到，但 P1-2 建索引時就要決定）
-- **lab 憑證過期**：embed 一次跑不完正常，靠續跑；過期用 refresh 腳本
-- **若未來決定上 prod**（非預設）：須補 ① prod AOS 版本對齊 ② event pipeline 嵌入責任歸屬（自嵌 vs connector）③ `knn` query（方式A）vs `neural` query（方式B）的 DSL 差異 ——這些 POC 階段不解，移到屆時的遷移評估
+- ❌ No shipping to prod, no replicating prod's RDS→event→OpenSearch sync (POC not bound to prod; JSON loaded directly into local OpenSearch)
+- ❌ No pgvector (since we want to practice the OpenSearch ecosystem, use OpenSearch directly)
+- ❌ No Bedrock KB (RAG document Q&A, not product-ranking search, wrong abstraction)
+- ❌ No OpenSearch Bedrock connector (approach B; heavy local setup, the POC uses approach A)
+- ❌ No hybrid fusion / API endpoint (Phase 2); no fixing category pollution (Phase 3)
+- ❌ No pre-stocking spare vectors, no multi-model comparison (Phase 1 is single Titan v2)
+
+---
+
+## 7. Risks and Notes
+
+- **Titan v2 regional availability**: verified available in ap-northeast-1
+- **OpenSearch memory**: JVM 1~2GB; Linux host `vm.max_map_count=262144` (built into Docker Desktop Mac)
+- **Security disabled locally**: `DISABLE_SECURITY_PLUGIN=true` is for local POC only
+- **k-NN index characteristics**: `index.knn` cannot be hot-changed on an existing index → changing the mapping / adding vectors requires reindex + alias
+- **Chinese BM25**: smartcn must be installed, otherwise the keyword half of hybrid's foundation is shaky (only fully used in Phase 2, but the decision must be made when building the index in P1-2)
+- **lab credentials expire**: it's normal for embed not to finish in one run, rely on resume; use the refresh script when expired
+- **If prod is ever decided on** (not the default): must additionally cover ① aligning the prod AOS version ② ownership of embedding responsibility in the event pipeline (self-embed vs connector) ③ the DSL difference between `knn` query (approach A) and `neural` query (approach B) — these are not solved at the POC stage and are moved to the migration assessment at that time

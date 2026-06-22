@@ -1,35 +1,36 @@
-"""LangChain 編排教學 — 用本專案「經銷商推薦」領域逐步講解 LCEL
+"""LangChain orchestration tutorial — learn LCEL step by step using this project's "dealer recommendation" domain
 
-閱讀方式:由上而下,每個 SECTION 是一個概念,從你現在的寫法演進到完整編排。
-這支檔案「可以直接跑」(mock LLM,不打 Bedrock,不花錢):
+How to read: top to bottom. Each SECTION is one concept, evolving from how you write code today
+toward full orchestration. This file "runs as-is" (mock LLM, no Bedrock calls, no cost):
 
     python docs/learning/langchain_orchestration.py
 
-對照你專案現況:
-  - src/recommender/services/agent_service.py      → 目前停在 SECTION 1 的寫法
-  - src/recommender/services/evaluation_service.py → 同上 + structured_output
+Mapped to your project's current state:
+  - src/recommender/services/agent_service.py      → currently stuck at the SECTION 1 style
+  - src/recommender/services/evaluation_service.py → same, plus structured_output
 
-學完後你會知道怎麼把「analyze → evaluate」串成一條真正的 chain。
+After this you'll know how to chain "analyze → evaluate" into one real chain.
 
 ═══════════════════════════════════════════════════════════════════════════
-  核心心智模型:一切都是 Runnable
+  Core mental model: everything is a Runnable
 ═══════════════════════════════════════════════════════════════════════════
 
-LangChain 編排的唯一主角叫 Runnable。Prompt template、LLM、parser、
-甚至你自己寫的 function,只要包成 Runnable,就共享同一套介面:
+The one and only protagonist of LangChain orchestration is the Runnable. Prompt templates, LLMs,
+parsers, and even functions you write yourself — as long as they're wrapped as a Runnable, they all
+share the same interface:
 
-    .invoke(x)      # 同步,輸入 x 回輸出
-    .ainvoke(x)     # 非同步 (你專案用這個)
-    .batch([x,...]) # 一次跑多筆 (自動平行)
-    .stream(x)      # 串流 token
+    .invoke(x)      # synchronous: takes input x, returns output
+    .ainvoke(x)     # asynchronous (this is what your project uses)
+    .batch([x,...]) # runs many inputs at once (auto-parallel)
+    .stream(x)      # streams tokens
 
-因為介面統一,才能用 `|` (pipe) 把它們接起來:
+Because the interface is unified, you can connect them with `|` (pipe):
 
     chain = prompt | llm | parser
-    #        Runnable Runnable Runnable  → 組合後「還是」一個 Runnable
+    #        Runnable Runnable Runnable  → once composed, it's "still" a Runnable
 
-`|` 不是 magic,它只是 `RunnableSequence(prompt, llm, parser)` 的語法糖。
-左邊的輸出餵給右邊的輸入,跟 shell pipe 一樣的直覺。
+`|` is not magic — it's just syntactic sugar for `RunnableSequence(prompt, llm, parser)`.
+The output on the left feeds the input on the right, as intuitive as a shell pipe.
 """
 
 from __future__ import annotations
@@ -40,181 +41,182 @@ from pydantic import BaseModel, Field
 
 
 # ===========================================================================
-# 先做一個假 LLM (mock),讓整支檔案不花錢就能跑
-# 真實專案你會換成 langchain_aws.ChatBedrockConverse(...)
+# First, build a fake LLM (mock) so this whole file can run for free
+# In a real project you'd swap this for langchain_aws.ChatBedrockConverse(...)
 # ===========================================================================
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 
 def make_fake_llm(responses: list[str]) -> FakeListChatModel:
-    """回一個會「依序吐固定字串」的假 LLM,介面跟真 ChatBedrockConverse 一樣。"""
+    """Return a fake LLM that "emits fixed strings in order", with the same interface as a real ChatBedrockConverse."""
     return FakeListChatModel(responses=responses)
 
 
 # ===========================================================================
-# SECTION 1 — 你現在的寫法 (agent_service.py 的等價物)
+# SECTION 1 — how you write it today (the equivalent of agent_service.py)
 # ===========================================================================
-# 目前 agent_service 是:把一整段 f-string 丟給 llm.ainvoke()。
-# 能動,但 prompt 跟邏輯黏在一起,無法重組、無法平行、無法換 parser。
+# Right now agent_service does this: hand a whole f-string to llm.ainvoke().
+# It works, but the prompt and the logic are glued together — you can't recompose it,
+# can't parallelize it, can't swap the parser.
 async def section1_current_style() -> None:
-    print("\n=== SECTION 1:目前寫法 (單純 ainvoke) ===")
-    llm = make_fake_llm(["P3C001 iPhone 16 Pro Max — 信心 0.91"])
+    print("\n=== SECTION 1: current style (plain ainvoke) ===")
+    llm = make_fake_llm(["P3C001 iPhone 16 Pro Max — confidence 0.91"])
 
     customer_id = "D-2049"
-    # 跟你 agent_service.py 一模一樣的風格:手動拼字串
+    # Exactly the style of your agent_service.py: manually concatenating strings
     prompt = (
-        f"你是本公司行銷分析師。請為經銷商 {customer_id} 推薦商品。"
+        f"You are the company's marketing analyst. Please recommend a product for dealer {customer_id}."
     )
     result = await llm.ainvoke(prompt)
-    print("輸出:", result.content)
-    # 問題:prompt 拼法散落各處、無法跟下游 parser 自動接、batch 要自己寫 for loop。
+    print("Output:", result.content)
+    # Problem: prompt construction is scattered everywhere, can't auto-connect to a downstream parser, batching means writing your own for loop.
 
 
 # ===========================================================================
-# SECTION 2 — 把 prompt 抽成 PromptTemplate,開始用 `|`
+# SECTION 2 — extract the prompt into a PromptTemplate, start using `|`
 # ===========================================================================
-# ChatPromptTemplate 是個 Runnable:輸入 dict,輸出「訊息」。
-# 它讓「模板」跟「資料」分離 —— 對齊你 CLAUDE.md「prompt 走 versioning」原則,
-# 因為模板可以從 DB / 檔案載入,變數 runtime 才注入。
+# ChatPromptTemplate is a Runnable: it takes a dict and outputs "messages".
+# It separates the "template" from the "data" — aligned with your CLAUDE.md "prompt versioning" principle,
+# because the template can be loaded from DB / file, with variables injected only at runtime.
 async def section2_prompt_template() -> None:
-    print("\n=== SECTION 2:PromptTemplate + pipe ===")
+    print("\n=== SECTION 2: PromptTemplate + pipe ===")
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
 
-    llm = make_fake_llm(["建議主推 P3C001,搭配 P3C003 配件"])
+    llm = make_fake_llm(["Recommend P3C001 as the headline product, paired with P3C003 as an accessory"])
 
-    # {dealer} 是佔位符,invoke 時才填。模板本身可入庫做 A/B (prompt_variants 表)。
+    # {dealer} is a placeholder, filled only at invoke time. The template itself can be stored for A/B testing (prompt_variants table).
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是本公司行銷分析師,只輸出推薦結論,不解釋。"),
-        ("human", "請為經銷商 {dealer} 推薦本月商品。"),
+        ("system", "You are the company's marketing analyst. Output only the recommendation conclusion, no explanation."),
+        ("human", "Please recommend this month's products for dealer {dealer}."),
     ])
 
-    # 三個 Runnable 串成一條鏈。StrOutputParser 把 LLM 的 Message 物件抽成純字串。
+    # Three Runnables chained together. StrOutputParser extracts the LLM's Message object into a plain string.
     chain = prompt | llm | StrOutputParser()
 
-    # 注意:invoke 的輸入是 dict,key 對應模板的 {dealer}
+    # Note: the input to invoke is a dict, whose key matches the template's {dealer}
     result = await chain.ainvoke({"dealer": "D-2049"})
-    print("鏈輸出 (已是純字串):", result)
+    print("Chain output (already a plain string):", result)
 
 
 # ===========================================================================
-# SECTION 3 — 結構化輸出 (你 evaluation_service 用的 with_structured_output)
+# SECTION 3 — structured output (the with_structured_output your evaluation_service uses)
 # ===========================================================================
-# ETL First, LLM Last 之下,LLM 輸出必須是「可被下游程式消費的結構」,不是自由文字。
-# with_structured_output(PydanticModel) 會自動把 Pydantic schema 翻成 JSON Schema
-# 塞進 LLM 的 tool-calling,並把回應 parse 回你的 Pydantic 物件。
+# Under "ETL First, LLM Last", the LLM's output must be a "structure consumable by downstream code", not free text.
+# with_structured_output(PydanticModel) automatically translates the Pydantic schema into a JSON Schema,
+# injects it into the LLM's tool-calling, and parses the response back into your Pydantic object.
 class Recommendation(BaseModel):
-    sku: str = Field(description="商品料號")
-    reason: str = Field(description="推薦理由")
-    confidence: float = Field(ge=0, le=1, description="信心度 0~1")
+    sku: str = Field(description="product SKU")
+    reason: str = Field(description="recommendation rationale")
+    confidence: float = Field(ge=0, le=1, description="confidence 0~1")
 
 
 async def section3_structured_output() -> None:
-    print("\n=== SECTION 3:結構化輸出 ===")
-    # 真實:llm.with_structured_output(Recommendation)
-    # mock 環境下 FakeListChatModel 不支援 tool-calling,所以這裡用「概念示意」:
-    print("真實寫法 (agent_service.py 該長這樣):")
+    print("\n=== SECTION 3: structured output ===")
+    # Real: llm.with_structured_output(Recommendation)
+    # In the mock environment FakeListChatModel doesn't support tool-calling, so here we just "illustrate the concept":
+    print("Real-world form (this is how agent_service.py should look):")
     print("    structured_llm = llm.with_structured_output(Recommendation)")
     print("    rec: Recommendation = await (prompt | structured_llm).ainvoke({...})")
-    print("    # rec.sku / rec.confidence 直接可用,不需手動 json.loads")
-    # 關鍵:加上 prompt | 之後,structured_llm 仍是 Runnable,可繼續往下串。
+    print("    # rec.sku / rec.confidence are ready to use, no manual json.loads needed")
+    # Key point: after adding prompt |, structured_llm is still a Runnable and can keep being chained.
 
 
 # ===========================================================================
-# SECTION 4 — 平行編排:RunnableParallel (一次跑多條,合併結果)
+# SECTION 4 — parallel orchestration: RunnableParallel (run several at once, merge results)
 # ===========================================================================
-# 你的場景:同一份經銷商資料,想同時產「推薦」和「風險評估」兩種 narrative。
-# 用 dict 包起來就是平行 —— LangChain 自動 concurrent 跑,等全部回來才合併。
-# 這比自己寫 asyncio.gather 乾淨,且每個分支「還是 Runnable」可單獨測試。
+# Your scenario: from the same dealer data, you want to produce both a "recommendation" and a "risk assessment" narrative at once.
+# Wrapping them in a dict makes it parallel — LangChain runs them concurrently and merges only when all return.
+# This is cleaner than writing your own asyncio.gather, and each branch is "still a Runnable" that can be tested on its own.
 async def section4_parallel() -> None:
-    print("\n=== SECTION 4:平行編排 RunnableParallel ===")
+    print("\n=== SECTION 4: parallel orchestration RunnableParallel ===")
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.runnables import RunnableParallel
 
     rec_chain = (
-        ChatPromptTemplate.from_template("為 {dealer} 推薦商品")
-        | make_fake_llm(["主推 P3C001 iPhone"])
+        ChatPromptTemplate.from_template("Recommend products for {dealer}")
+        | make_fake_llm(["Headline product P3C001 iPhone"])
         | StrOutputParser()
     )
     risk_chain = (
-        ChatPromptTemplate.from_template("評估 {dealer} 的呆帳風險")
-        | make_fake_llm(["風險低,付款紀錄良好"])
+        ChatPromptTemplate.from_template("Assess the bad-debt risk of {dealer}")
+        | make_fake_llm(["Low risk, good payment history"])
         | StrOutputParser()
     )
 
-    # 一個 dict = 一個 RunnableParallel。兩條鏈拿到「同一份輸入」,平行執行。
+    # One dict = one RunnableParallel. Both chains receive "the same input" and run in parallel.
     combined = RunnableParallel(recommendation=rec_chain, risk=risk_chain)
 
     result = await combined.ainvoke({"dealer": "D-2049"})
-    print("合併結果:", result)  # {'recommendation': '...', 'risk': '...'}
+    print("Merged result:", result)  # {'recommendation': '...', 'risk': '...'}
 
 
 # ===========================================================================
-# SECTION 5 — 串接兩階段:analyze → evaluate (你專案的真實需求)
+# SECTION 5 — chaining two stages: analyze → evaluate (your project's real need)
 # ===========================================================================
-# agent_service 跑完推薦後,evaluation_service 要 LLM-as-judge 評分。
-# 目前是兩個 service 各自 ainvoke。用 LCEL 可串成一條:
+# After agent_service produces a recommendation, evaluation_service runs LLM-as-judge to score it.
+# Today these are two services each doing their own ainvoke. With LCEL you can chain them into one:
 #
-#   analyze_chain | (把推薦轉成 judge 的輸入) | judge_chain
+#   analyze_chain | (convert the recommendation into the judge's input) | judge_chain
 #
-# 中間那個「轉換」用 RunnableLambda 包一個普通 function 即可 ——
-# 這就是把「你自己的 Python 邏輯」插進 LCEL 管線的方法。
+# That middle "conversion" is just a plain function wrapped in a RunnableLambda —
+# this is how you insert "your own Python logic" into an LCEL pipeline.
 async def section5_two_stage_pipeline() -> None:
-    print("\n=== SECTION 5:analyze → evaluate 串成一條鏈 ===")
+    print("\n=== SECTION 5: chain analyze → evaluate into one chain ===")
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.runnables import RunnableLambda
 
     analyze = (
-        ChatPromptTemplate.from_template("為 {dealer} 產出推薦")
-        | make_fake_llm(["推薦 P3C001,理由:Apple 生態忠誠"])
+        ChatPromptTemplate.from_template("Produce a recommendation for {dealer}")
+        | make_fake_llm(["Recommend P3C001, rationale: loyalty to the Apple ecosystem"])
         | StrOutputParser()
     )
 
-    # RunnableLambda:把普通 function 變 Runnable。這裡把上游推薦字串
-    # 重新打包成 judge 鏈需要的 dict 輸入 (你的 _build_prompt 等價物)。
+    # RunnableLambda: turns a plain function into a Runnable. Here it repackages the upstream
+    # recommendation string into the dict input the judge chain needs (the equivalent of your _build_prompt).
     def to_judge_input(recommendation: str) -> dict:
         return {"rec": recommendation}
 
     judge = (
-        ChatPromptTemplate.from_template("評分這份推薦的合理性 (0-10):{rec}")
-        | make_fake_llm(["評分 8/10,理由充分但缺量化"])
+        ChatPromptTemplate.from_template("Score the soundness of this recommendation (0-10): {rec}")
+        | make_fake_llm(["Score 8/10, well-reasoned but lacks quantification"])
         | StrOutputParser()
     )
 
-    # 一條龍:推薦 → 轉換 → 評分。上游輸出自動餵下游。
+    # End to end: recommend → convert → score. Upstream output auto-feeds downstream.
     pipeline = analyze | RunnableLambda(to_judge_input) | judge
 
     verdict = await pipeline.ainvoke({"dealer": "D-2049"})
-    print("最終評分:", verdict)
-    # 好處:整條 pipeline 是一個 Runnable,可 .batch() 一次跑全部經銷商、
-    #       可掛 LangSmith 自動 trace 每一步、可在任一節點插 retry。
+    print("Final score:", verdict)
+    # Benefits: the whole pipeline is a single Runnable — you can .batch() it to run all dealers at once,
+    #           hook up LangSmith to auto-trace every step, and insert a retry at any node.
 
 
 # ===========================================================================
-# SECTION 6 — 韌性:retry / fallback (上 prod 前一定要的)
+# SECTION 6 — resilience: retry / fallback (a must before going to prod)
 # ===========================================================================
-# Bedrock 偶爾 throttle 或回非結構化內容。LCEL 在「任何 Runnable」上都能
-# 直接掛 retry 與 fallback,不用改鏈內邏輯。
+# Bedrock occasionally throttles or returns unstructured content. LCEL lets you attach retry and fallback
+# directly to "any Runnable" without changing the chain's internal logic.
 async def section6_resilience() -> None:
-    print("\n=== SECTION 6:retry + fallback ===")
-    primary = make_fake_llm(["主模型回應"])
-    backup = make_fake_llm(["備援模型回應"])
+    print("\n=== SECTION 6: retry + fallback ===")
+    primary = make_fake_llm(["primary model response"])
+    backup = make_fake_llm(["backup model response"])
 
-    # .with_retry():自動重試 (指數退避)。對齊 safety.md「Bedrock 會花錢」——
-    # 設 stop_after_attempt 上限避免無限重試燒 token。
+    # .with_retry(): automatic retries (exponential backoff). Aligned with safety.md "Bedrock costs money" —
+    # set a stop_after_attempt cap to avoid infinite retries burning tokens.
     robust = primary.with_retry(stop_after_attempt=3)
 
-    # .with_fallbacks():主鏈整個壞掉時切備援 (例:Sonnet → Haiku 降級)。
+    # .with_fallbacks(): switch to a backup when the primary chain fails entirely (e.g. Sonnet → Haiku downgrade).
     robust_with_backup = robust.with_fallbacks([backup])
 
-    out = await robust_with_backup.ainvoke("為 D-2049 推薦")
-    print("韌性鏈輸出:", out.content)
+    out = await robust_with_backup.ainvoke("Recommend for D-2049")
+    print("Resilient chain output:", out.content)
 
 
 # ===========================================================================
-# 主程式:依序跑全部 section
+# Main program: run all sections in order
 # ===========================================================================
 async def main() -> None:
     await section1_current_style()
@@ -223,7 +225,7 @@ async def main() -> None:
     await section4_parallel()
     await section5_two_stage_pipeline()
     await section6_resilience()
-    print("\n全部跑完。回頭對照 agent_service.py,你會看到它停在 SECTION 1。")
+    print("\nAll done. Now go compare with agent_service.py — you'll see it stops at SECTION 1.")
 
 
 if __name__ == "__main__":
