@@ -23,13 +23,22 @@ cd "$(dirname "$0")/.."
 # IAM user long-term keys (read from environment variables; the script does not persist them)
 LT_ACCESS_KEY="${AWS_MFA_ACCESS_KEY_ID:?請先 export AWS_MFA_ACCESS_KEY_ID（IAM user 長期 access key）}"
 LT_SECRET_KEY="${AWS_MFA_SECRET_ACCESS_KEY:?請先 export AWS_MFA_SECRET_ACCESS_KEY（IAM user 長期 secret key）}"
-MFA_ACCOUNT="${AWS_MFA_ACCOUNT:-<REDACTED_ACCOUNT>}"      # playground account (where the jerry_playground MFA lives)
-MFA_DEVICE="${AWS_MFA_DEVICE:-jerry_playground}"
-MFA_SERIAL="arn:aws:iam::${MFA_ACCOUNT}:mfa/${MFA_DEVICE}"
+# MFA serial ARN — resolved dynamically from the IAM user's registered device, so no account ID is
+# hardcoded (keeps it out of the public repo). Override via AWS_MFA_SERIAL, or AWS_MFA_ACCOUNT+AWS_MFA_DEVICE.
+MFA_SERIAL="${AWS_MFA_SERIAL:-}"
+if [ -z "$MFA_SERIAL" ] && [ -n "${AWS_MFA_ACCOUNT:-}" ]; then
+    MFA_SERIAL="arn:aws:iam::${AWS_MFA_ACCOUNT}:mfa/${AWS_MFA_DEVICE:-jerry_playground}"
+fi
+if [ -z "$MFA_SERIAL" ]; then
+    MFA_SERIAL=$(AWS_ACCESS_KEY_ID="$LT_ACCESS_KEY" AWS_SECRET_ACCESS_KEY="$LT_SECRET_KEY" \
+        aws iam list-mfa-devices --query 'MFADevices[0].SerialNumber' --output text 2>/dev/null || true)
+fi
+[ -n "$MFA_SERIAL" ] && [ "$MFA_SERIAL" != "None" ] || {
+    echo "❌ 找不到 MFA serial。請 export AWS_MFA_SERIAL=arn:aws:iam::<account>:mfa/<device>"; exit 1; }
 BASE_PROFILE="${AWS_BASE_PROFILE:-playground}"      # source_profile for lab/stg/prd
 DURATION="${SESSION_DURATION:-86400}"               # 24h (IAM user get-session-token cap is 36h)
 
-echo "==> 基底 profile: $BASE_PROFILE  ·  MFA: $MFA_DEVICE  ·  時效: $((DURATION/3600))h"
+echo "==> 基底 profile: $BASE_PROFILE  ·  MFA: ${MFA_SERIAL##*/}  ·  時效: $((DURATION/3600))h"
 printf "請輸入 MFA 6 位數代碼: "
 read -r MFA_CODE
 [[ "$MFA_CODE" =~ ^[0-9]{6}$ ]] || { echo "❌ MFA 代碼必須是 6 位數字"; exit 1; }
