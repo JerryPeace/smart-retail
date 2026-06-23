@@ -16,7 +16,7 @@ SEARCH_INDEX ?= products_v5_cohere
 
 .PHONY: help \
         dev infra-up infra-down infra-clean infra-status \
-        migrate api refresh-creds refresh-creds-mfa \
+        migrate api refresh-creds \
         search-setup search-load search-embed search-verify \
         analyze list-analyses narrative health \
         etl-april
@@ -62,9 +62,6 @@ api: ## Start FastAPI alone (foreground, --reload)
 # ====================================================================
 refresh-creds: ## Refresh the AWS lab temporary credentials (run once they expire after ~1hr, no MFA needed)
 	./scripts/refresh-lab-creds.sh
-
-refresh-creds-mfa: ## Use MFA to refresh the base session to 24h (no more MFA all day; must export AWS_MFA_ACCESS_KEY_ID/SECRET first)
-	./scripts/refresh-session-token.sh
 
 # ====================================================================
 # Product search search_engine (vector index build — one-command vector flow for teammates)

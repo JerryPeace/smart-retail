@@ -40,7 +40,7 @@ After that all 6 services are running. **For product search you still need to bu
 git clone <repo> && cd marketing-recommandation && uv sync
 
 # 2. Refresh AWS lab credentials (vectorization calls Bedrock Cohere v4, needs credentials)
-make refresh-creds                # expires ~1hr; or make refresh-creds-mfa for a 24h session
+make refresh-creds                # expires ~1hr (refreshes from the live base session, no MFA)
 
 # 3. Start services (brings OpenSearch up too)
 make dev                          # foreground; FastAPI starts only after OpenSearch is healthy
@@ -59,7 +59,7 @@ After `make search-setup`, OpenSearch holds the `products_v5_cohere` index (26,0
 | Item | Notes |
 |------|------|
 | **Vector model** | Cohere Embed v4 (`cohere.embed-v4:0`) / 1536 dims / region `ap-northeast-1`. Index `products_v5_cohere`, fusion weight `w_bm25=0.2` (configurable). |
-| **Credentials** | App vectorization uses the `lab` profile with **auto-renewal** (`aws_profile=lab`); static `.env.local` credentials are capped at ~1h by AWS role chaining. To avoid re-entering MFA all day → `make refresh-creds-mfa` (first `export AWS_MFA_ACCESS_KEY_ID/SECRET`). |
+| **Credentials** | App vectorization uses the `lab` profile with **auto-renewal** (`aws_profile=lab`); static `.env.local` credentials are capped at ~1h by AWS role chaining, so rerun `make refresh-creds` to refresh them from the live base session. |
 | **search 500** | Usually expired credentials. Run `make refresh-creds` then **restart `make dev`** (credentials are read at process start). |
 | **Cost** | `make search-embed` (part of search-setup) is 26k × Cohere v4 ≈ <$1 one-off. Reruns are idempotent — only fills gaps, no double charging. |
 | **Rebuild / switch index** | `make search-setup SEARCH_INDEX=products_v6` targets a different index name. |
@@ -118,7 +118,6 @@ make search-verify Q=cold-hands   # search smoke test (curl /search)
 
 ```bash
 make refresh-creds                # refresh lab temporary credentials (run when ~1hr expires, no MFA)
-make refresh-creds-mfa            # use MFA to refresh the base session to 24h (first export AWS_MFA_ACCESS_KEY_ID/SECRET)
 ```
 
 ### Run analysis (end-to-end demo)
@@ -206,7 +205,7 @@ make infra-clean                   # ⚠️ also wipe volumes, DB reset
 | `Cannot connect to the Docker daemon at unix:///...orbstack` | OrbStack not started | `open -a OrbStack` |
 | `port is already allocated` | 5434/6380/4567/8081 taken | `lsof -i :{port}` to find the owner, or stop it |
 | `database "marketing_cleaner" does not exist` | first start, init script not done yet | wait 30s, or `make infra-down` then up |
-| FastAPI 401 / search 500 on Bedrock | lab credentials expired (~1 hour) | `make refresh-creds` then **restart `make dev`** (credentials read at process start); to avoid re-entering all day → `make refresh-creds-mfa` |
+| FastAPI 401 / search 500 on Bedrock | lab credentials expired (~1 hour) | `make refresh-creds` then **restart `make dev`** (credentials read at process start) |
 | `make dev` reports `Errno 48 Address already in use` | stale uvicorn holding 8000 | dev.sh already self-cleans; if still stuck `lsof -ti:8000 \| xargs kill -9` |
 
 ---
@@ -252,7 +251,6 @@ The handling flow for future months (e.g. May) is in [`docs/plans/data-governanc
 ├── scripts/
 │   ├── dev.sh                              ← `make dev` (start infra incl. opensearch + self-clean + FastAPI)
 │   ├── refresh-lab-creds.sh                ← `make refresh-creds` (lab credentials ~1h, no MFA)
-│   ├── refresh-session-token.sh            ← `make refresh-creds-mfa` (MFA refreshes base session to 24h)
 │   ├── localstack/init-buckets.sh          LocalStack ready.d auto-creates buckets + syncs fixtures
 │   ├── db/                                 DB reset / dump tools
 │   └── etl/                                ETL + search CLIs (load_products_os / embed_products_os / judge…)
